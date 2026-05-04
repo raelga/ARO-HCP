@@ -1,6 +1,6 @@
 module github.com/Azure/ARO-HCP/tooling/kustoctl
 
-go 1.25.5
+go 1.25.7
 
 require (
 	github.com/Azure/azure-kusto-go/azkustodata v1.2.1
