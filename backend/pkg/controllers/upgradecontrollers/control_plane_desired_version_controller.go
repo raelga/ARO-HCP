@@ -61,6 +61,11 @@ type controlPlaneDesiredVersionSyncer struct {
 	clusterServiceClient                  ocm.ClusterServiceClientSpec
 	subscriptionLister                    listers.SubscriptionLister
 
+	// defaultClusterUUID is used for Cincinnati queries when a cluster does not
+	// yet have a ClusterServiceID (CS creation is still pending). Cincinnati's
+	// upgrade graph is deterministic regardless of UUID, so a shared default is safe.
+	defaultClusterUUID uuid.UUID
+
 	cincinnatiClientLock      sync.RWMutex
 	clusterToCincinnatiClient *lru.Cache
 }
@@ -85,6 +90,7 @@ func NewControlPlaneDesiredVersionController(
 		clusterToCincinnatiClient:             lru.New(100000),
 		clusterServiceClient:                  clusterServiceClient,
 		subscriptionLister:                    subscriptionLister,
+		defaultClusterUUID:                    uuid.New(),
 	}
 
 	controller := controllerutils.NewClusterWatchingController(
@@ -119,11 +125,6 @@ func (c *controlPlaneDesiredVersionSyncer) SyncOnce(ctx context.Context, key con
 	if err != nil {
 		return utils.TrackError(fmt.Errorf("failed to get Cluster: %w", err))
 	}
-	if existingCluster.ServiceProviderProperties.ClusterServiceID == nil {
-		// Currently, this is correct.  We will likely refactor and change this to separate the read of active versions from the determination
-		// of the next desired version: we'll need to choose a desired version even if there are no active versions.
-		return nil
-	}
 
 	existingServiceProviderCluster, err := database.GetOrCreateServiceProviderCluster(ctx, c.cosmosClient, key.GetResourceID())
 	if err != nil {
@@ -131,13 +132,15 @@ func (c *controlPlaneDesiredVersionSyncer) SyncOnce(ctx context.Context, key con
 	}
 
 	// Resolve the cluster UUID from the cached HostedCluster so we can build the Cincinnati client.
+	// For new clusters where the HostedCluster doesn't exist yet (CS cluster creation is deferred
+	// to the backend), we generate a UUID. The specific UUID only affects Cincinnati telemetry,
+	// not version graph resolution.
 	clusterUUID, found, err := maestrohelpers.GetCachedHostedClusterUUIDForCluster(ctx, c.clusterManagementClusterContentLister, key.SubscriptionID, key.ResourceGroupName, key.HCPClusterName)
 	if err != nil {
 		return err
 	}
 	if !found {
-		// will reappear once the informer relists; without the UUID we cannot build the Cincinnati client
-		return nil
+		clusterUUID = c.defaultClusterUUID
 	}
 	cincinnatiClient := c.getCincinnatiClient(key, clusterUUID)
 
