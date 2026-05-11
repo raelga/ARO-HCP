@@ -51,6 +51,7 @@ func TestCrossVersionRoundTrip(t *testing.T) {
 const (
 	v2024 = "2024-06-10-preview"
 	v2025 = "2025-12-23-preview"
+	v2026 = "2026-05-31-preview"
 )
 
 func testCrossVersionRoundTrip(t *testing.T, withMock bool) {
