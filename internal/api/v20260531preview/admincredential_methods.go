@@ -12,26 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package conversion
+package v20260531preview
 
 import (
 	"github.com/Azure/ARO-HCP/internal/api"
 	"github.com/Azure/ARO-HCP/internal/api/arm"
+	"github.com/Azure/ARO-HCP/internal/api/v20260531preview/generated"
 )
 
-func CopyReadOnlyProxyResourceValues(dest, src *arm.ProxyResource) {
-	dest.ID = src.ID
-	dest.Name = src.Name
-	dest.Type = src.Type
-	dest.SystemData = src.SystemData.DeepCopy()
+func newHCPOpenShiftClusterAdminCredential(from *api.HCPOpenShiftClusterAdminCredential) *generated.HcpOpenShiftClusterAdminCredential {
+	return &generated.HcpOpenShiftClusterAdminCredential{
+		ExpirationTimestamp: api.PtrOrNil(from.ExpirationTimestamp),
+		Kubeconfig:          api.PtrOrNil(from.Kubeconfig),
+	}
 }
 
-func CopyReadOnlyExternalAuthValues(dest, src *api.HCPOpenShiftClusterExternalAuth) {
-	CopyReadOnlyProxyResourceValues(&dest.ProxyResource, &src.ProxyResource)
-
-	dest.Properties.ProvisioningState = src.Properties.ProvisioningState
-	dest.Properties.Condition = *src.Properties.Condition.DeepCopy()
-	dest.Properties.Conditions = src.Properties.Conditions
-	dest.ServiceProviderProperties = *src.ServiceProviderProperties.DeepCopy()
-	dest.CosmosETag = src.CosmosETag
+func (v version) MarshalHCPOpenShiftClusterAdminCredential(from *api.HCPOpenShiftClusterAdminCredential) ([]byte, error) {
+	return arm.MarshalJSON(newHCPOpenShiftClusterAdminCredential(from))
 }

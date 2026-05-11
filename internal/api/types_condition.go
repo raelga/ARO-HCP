@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package api
 
-// This will invoke the init() function in each
-// API version package so it can register itself.
-import (
-	_ "github.com/Azure/ARO-HCP/internal/api/v20240610preview"
-	_ "github.com/Azure/ARO-HCP/internal/api/v20251223preview"
-	_ "github.com/Azure/ARO-HCP/internal/api/v20260531preview"
-)
+import "time"
+
+// Condition represents an observation of the resource's current state.
+type Condition struct {
+	Type               ConditionType       `json:"type"`
+	Status             ConditionStatusType `json:"status"`
+	LastTransitionTime time.Time           `json:"lastTransitionTime"`
+	Reason             string              `json:"reason"`
+	Message            string              `json:"message"`
+}
