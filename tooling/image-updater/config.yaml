@@ -23,7 +23,7 @@ images:
     group: hypershift-stack
     source:
       image: quay.io/redhat-services-prod/crt-redhat-acm-tenant/hypershift/hypershift-operator
-      tag: "latest"
+      tag: "76d06fa5b9e4d183af308cf02f13392bce4d0f8d" # pinned for AROSLSRE-835
       multiArch: true # Use multi-arch manifest
       useAuth: true
       keyVault:
