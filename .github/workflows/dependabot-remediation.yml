@@ -1,0 +1,145 @@
+name: Dependabot Remediation Dispatcher
+
+# Groups open Dependabot alerts by package and opens (or updates) one tracking
+# issue per group assigned to the Copilot coding agent, which then produces a
+# grouped, go.work-aware remediation PR following
+# .github/instructions/dependabot-remediation.instructions.md.
+#
+# The human review/merge gate (branch protection `tide` + maintainer /lgtm) is
+# always preserved — this workflow never merges anything.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC, after the weekly Dependabot refresh
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Optional filter: severity (high|medium|low), ecosystem (go|pip|npm), package name, or CVE id. Empty = all."
+        required: false
+        default: ""
+      dry_run:
+        description: "List the proposed groups without creating issues."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-remediation
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: read # read Dependabot alerts
+      issues: write # create/label tracking issues
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Group open alerts and dispatch to Copilot
+        env:
+          # A token with `security_events:read`, `issues:write` and the ability to
+          # assign the Copilot coding agent. The default GITHUB_TOKEN CANNOT read
+          # Dependabot alerts, so a GitHub App installation token or a fine-grained
+          # PAT must be provided as the `DEPENDABOT_REMEDIATION_TOKEN` secret.
+          GH_TOKEN: ${{ secrets.DEPENDABOT_REMEDIATION_TOKEN }}
+          FILTER: ${{ inputs.filter }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "::group::List open Dependabot alerts"
+          gh api "repos/$REPO/dependabot/alerts" --paginate --jq '
+            .[] | select(.state == "open") | {
+              number,
+              cve: .security_advisory.cve_id,
+              ghsa: .security_advisory.ghsa_id,
+              severity: .security_advisory.severity,
+              package: .security_vulnerability.package.name,
+              ecosystem: .security_vulnerability.package.ecosystem,
+              fixed: .security_vulnerability.first_patched_version.identifier,
+              manifest: .dependency.manifest_path
+            }' | jq -s '.' > alerts.json
+          echo "open alerts: $(jq length alerts.json)"
+          echo "::endgroup::"
+
+          echo "::group::Group by package"
+          # One group per package; carries alert numbers, highest severity, CVEs,
+          # whether a patched version exists (no-fix advisories are flagged).
+          jq '
+            group_by(.package)
+            | map({
+                package: .[0].package,
+                ecosystem: .[0].ecosystem,
+                alerts: [.[].number],
+                cves: ([.[].cve] | map(select(. != null)) | unique),
+                fixed: ([.[].fixed] | map(select(. != null)) | unique),
+                has_fix: (any(.[].fixed; . != null)),
+                severity: ([.[].severity] | max_by(
+                    (if . == "critical" then 4 elif . == "high" then 3
+                     elif . == "medium" then 2 else 1 end)))
+              })
+            | sort_by(if .severity == "critical" then 4 elif .severity == "high" then 3
+                      elif .severity == "medium" then 2 else 1 end)
+            | reverse
+          ' alerts.json > groups.json
+          jq -r '.[] | "  \(.severity)\t\(.package)\t\(.alerts | length) alert(s)\thas_fix=\(.has_fix)"' groups.json
+          echo "::endgroup::"
+
+          if [ -n "$FILTER" ]; then
+            jq --arg f "$FILTER" '[.[] | select(
+              (.package | test($f; "i")) or (.ecosystem == $f) or
+              (.severity == $f) or (.cves[]? | test($f; "i")))]' groups.json > groups.filtered.json
+            mv groups.filtered.json groups.json
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN — no issues created. Proposed groups:"
+            jq -r '.[] | "- \(.package) (\(.severity)): \(.alerts | length) alert(s), fix=\(.has_fix)"' groups.json
+            exit 0
+          fi
+
+          echo "::group::Open / update tracking issues"
+          jq -c '.[]' groups.json | while read -r g; do
+            pkg=$(echo "$g"        | jq -r '.package')
+            sev=$(echo "$g"        | jq -r '.severity')
+            has_fix=$(echo "$g"    | jq -r '.has_fix')
+            alerts=$(echo "$g"     | jq -r '.alerts | map("#\(.)") | join(", ")')
+            cves=$(echo "$g"       | jq -r '.cves | join(", ")')
+            fixed=$(echo "$g"      | jq -r '.fixed | join(", ")')
+            title="deps: remediate ${pkg} (${sev}, $(echo "$g" | jq -r '.alerts | length') alerts)"
+
+            # Skip if an open tracking issue or remediation PR already exists.
+            existing=$(gh issue list --repo "$REPO" --state open --search "in:title \"$title\"" --json number --jq '.[0].number' || true)
+            if [ -n "$existing" ]; then echo "exists: #$existing ($pkg)"; continue; fi
+
+            body=$(cat <<EOF
+          ## Automated Dependabot remediation — \`${pkg}\`
+
+          @copilot please remediate this group following
+          \`.github/instructions/dependabot-remediation.instructions.md\`.
+
+          - **Package:** \`${pkg}\` (${sev})
+          - **Fixed version(s):** ${fixed:-none available}
+          - **CVEs:** ${cves:-n/a}
+          - **Dependabot alerts:** ${alerts}
+          - **Has patched version:** ${has_fix}
+
+          Steps: bump across ALL affected modules, run \`make all-tidy\` + \`make test-compile\` + \`make lint\`, open ONE grouped PR, link a Vulnerability JIRA, and \`Closes\` any superseded native-Dependabot PRs.
+
+          $( [ "$has_fix" = "false" ] && echo "> No patched version exists — dismiss the alert(s) with justification and track in JIRA instead of faking a fix." )
+          EOF
+          )
+            num=$(gh issue create --repo "$REPO" --title "$title" --body "$body" \
+                  --label "dependabot-remediation,security" --assignee "copilot" --json number --jq '.number' 2>/dev/null || \
+                  gh issue create --repo "$REPO" --title "$title" --body "$body" \
+                  --label "dependabot-remediation,security" --json number --jq '.number')
+            echo "created #$num for $pkg"
+          done
+          echo "::endgroup::"
