@@ -43,13 +43,16 @@ jobs:
 
       - name: Group open alerts and dispatch to Copilot
         env:
-          # Prefer a dedicated token (`DEPENDABOT_REMEDIATION_TOKEN`) that can also
-          # reliably assign the Copilot coding agent to the tracking issue. When the
-          # secret is absent we fall back to the workflow's own GITHUB_TOKEN, which —
-          # given the `security-events: read` + `issues: write` permissions granted
-          # to this job below — CAN read Dependabot alerts and open issues. (The
-          # Copilot-assignment step is best-effort and degrades to an unassigned
-          # issue if the token cannot assign the agent.)
+          # DEPENDABOT_REMEDIATION_TOKEN is REQUIRED to read alerts: the built-in
+          # GITHUB_TOKEN is an "integration" and the Dependabot alerts REST API
+          # rejects it with 403 "Resource not accessible by integration" even with
+          # `security-events: read` granted (confirmed on this repo 2026-07-20).
+          # Provide a fine-grained PAT / GitHub App token with security_events:read
+          # + issues:write (+ ability to assign the Copilot agent) as that secret.
+          # The `|| github.token` fallback only keeps non-alert gh calls working; a
+          # run without the secret will stop at the preflight below with a clear
+          # message. The Copilot-assignment step degrades to an unassigned issue if
+          # the token cannot assign the agent.
           GH_TOKEN: ${{ secrets.DEPENDABOT_REMEDIATION_TOKEN || github.token }}
           FILTER: ${{ inputs.filter }}
           # Safe by default: scheduled runs always do a harmless grouping preview.
@@ -61,10 +64,12 @@ jobs:
 
           echo "::group::Preflight — verify Dependabot alert read access"
           if ! gh api "repos/$REPO/dependabot/alerts?per_page=1" >/dev/null 2>&1; then
-            echo "::error::Cannot read Dependabot alerts for $REPO. Ensure Dependabot"
-            echo "::error::alerts are enabled and that either the DEPENDABOT_REMEDIATION_TOKEN"
-            echo "::error::secret is set (security_events:read) or this job keeps the"
-            echo "::error::'security-events: read' permission so GITHUB_TOKEN can read them."
+            echo "::error::Cannot read Dependabot alerts for $REPO."
+            echo "::error::Set the DEPENDABOT_REMEDIATION_TOKEN secret to a fine-grained PAT"
+            echo "::error::or GitHub App token with security_events:read (+ issues:write)."
+            echo "::error::The built-in GITHUB_TOKEN is rejected by the Dependabot alerts API"
+            echo "::error::(403 'Resource not accessible by integration'), and the alerts"
+            echo "::error::feature must be enabled in the repository's security settings."
             exit 1
           fi
           echo "::endgroup::"
