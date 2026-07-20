@@ -75,9 +75,14 @@ jobs:
           #   2. DEPENDABOT_REMEDIATION_TOKEN (fine-grained PAT — fork/personal only).
           #   3. github.token — only keeps non-alert gh calls working; a run with
           #      no App/PAT stops at the preflight below with a clear message.
-          # The Copilot-assignment step degrades to an unassigned issue if the
-          # token cannot assign the agent.
+          # The Copilot-assignment step needs a USER token — an App/GITHUB_TOKEN
+          # cannot trigger the coding agent (suggestedActors omits
+          # copilot-swe-agent for them, confirmed 2026-07-20). Provide a user PAT
+          # as DEPENDABOT_REMEDIATION_TOKEN to auto-assign; otherwise the issue is
+          # created and a human must assign Copilot.
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.DEPENDABOT_REMEDIATION_TOKEN || github.token }}
+          # User PAT used ONLY for the Copilot-assignment GraphQL calls.
+          ASSIGN_TOKEN: ${{ secrets.DEPENDABOT_REMEDIATION_TOKEN }}
           FILTER: ${{ inputs.filter }}
           # Safe by default: scheduled runs always do a harmless grouping preview.
           # Only a manual dispatch with dry_run=false actually opens issues.
@@ -159,11 +164,17 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::Open / update tracking issues"
-          # Copilot coding-agent bot node id — assigning it kicks off the agent.
-          # Reliable via GraphQL (gh issue create --assignee does not resolve it).
-          copilot_id=$(gh api graphql -f query='query($o:String!,$n:String!){repository(owner:$o,name:$n){suggestedActors(capabilities:[CAN_BE_ASSIGNED],first:50){nodes{login __typename ... on Bot{id}}}}}' \
-            -f o="${REPO%/*}" -f n="${REPO#*/}" \
-            --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id' 2>/dev/null || true)
+          # Assigning the Copilot coding agent requires a USER token; the App
+          # installation token / GITHUB_TOKEN cannot (GitHub omits
+          # copilot-swe-agent from suggestedActors for them). Use ASSIGN_TOKEN
+          # (a user PAT) for the lookup + assignment; if absent, create the issue
+          # and leave a note for a human to assign Copilot.
+          copilot_id=""
+          if [ -n "${ASSIGN_TOKEN:-}" ]; then
+            copilot_id=$(GH_TOKEN="$ASSIGN_TOKEN" gh api graphql -f query='query($o:String!,$n:String!){repository(owner:$o,name:$n){suggestedActors(capabilities:[CAN_BE_ASSIGNED],first:50){nodes{login __typename ... on Bot{id}}}}}' \
+              -f o="${REPO%/*}" -f n="${REPO#*/}" \
+              --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id' 2>/dev/null || true)
+          fi
 
           jq -c '.[]' groups.json | while read -r g; do
             pkg=$(echo "$g"        | jq -r '.package')
@@ -203,14 +214,14 @@ jobs:
 
             if [ -n "$copilot_id" ]; then
               issue_id=$(gh api "repos/$REPO/issues/$num" --jq '.node_id')
-              if gh api graphql -f query='mutation($a:ID!,$actor:ID!){replaceActorsForAssignable(input:{assignableId:$a,actorIds:[$actor]}){assignable{... on Issue{number}}}}' \
+              if GH_TOKEN="$ASSIGN_TOKEN" gh api graphql -f query='mutation($a:ID!,$actor:ID!){replaceActorsForAssignable(input:{assignableId:$a,actorIds:[$actor]}){assignable{... on Issue{number}}}}' \
                    -f a="$issue_id" -f actor="$copilot_id" >/dev/null 2>&1; then
                 echo "assigned copilot-swe-agent to #$num"
               else
                 echo "could not assign copilot to #$num (left unassigned)"
               fi
             else
-              echo "copilot agent not assignable on $REPO; #$num left unassigned"
+              echo "no user PAT (DEPENDABOT_REMEDIATION_TOKEN) for agent assignment; #$num left for a human to assign to Copilot"
             fi
           done
           echo "::endgroup::"
