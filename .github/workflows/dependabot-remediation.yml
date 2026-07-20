@@ -37,21 +37,28 @@ jobs:
       security-events: read # read Dependabot alerts
       issues: write # create/label tracking issues
       contents: read
+    # Exposed at job level because the `secrets` context is NOT allowed in a
+    # step-level `if:` — the `env` context is, so we gate the App-token step on
+    # env.DEPENDABOT_APP_ID instead.
+    env:
+      DEPENDABOT_APP_ID: ${{ secrets.DEPENDABOT_APP_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       # Preferred auth: a GitHub App installation token. The Azure/ARO-HCP org
       # BLOCKS fine-grained PATs, so upstream this is the ONLY viable non-human
-      # token that can read Dependabot alerts. Grant the App these repository
-      # permissions: "Dependabot alerts: read", "Issues: read and write",
-      # "Contents: read" (+ the org must allow it to assign the Copilot agent).
-      # Configure secrets DEPENDABOT_APP_ID + DEPENDABOT_APP_PRIVATE_KEY. On a
+      # token that can read Dependabot alerts. Use the Azure-owned App
+      # "aro-hcp-robot" (App ID 2853172). It must be granted these repository
+      # permissions (owner/org-admin action — it currently only has contents:write,
+      # pull_requests:write, metadata:read): "Dependabot alerts: read" and
+      # "Issues: write". Set secrets DEPENDABOT_APP_ID (= 2853172) +
+      # DEPENDABOT_APP_PRIVATE_KEY, and install the App on the target repo. On a
       # personal fork where PATs are allowed you may skip the App and set
       # DEPENDABOT_REMEDIATION_TOKEN instead (used as a fallback below).
       - name: Mint GitHub App token
         id: app-token
-        if: ${{ secrets.DEPENDABOT_APP_ID != '' }}
+        if: ${{ env.DEPENDABOT_APP_ID != '' }}
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.DEPENDABOT_APP_ID }}
