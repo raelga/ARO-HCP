@@ -1,5 +1,4 @@
 name: "Copilot Setup Steps"
-
 # Provisions the Copilot cloud-agent development environment for ARO-HCP so that
 # the agent can run the full go.work dependency-remediation ritual
 # (`make all-tidy` -> `make test-compile` -> `make lint`) that native Dependabot skips.
@@ -10,11 +9,10 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - .github/workflows/copilot-setup-steps.yml
+    - .github/workflows/copilot-setup-steps.yml
   pull_request:
     paths:
-      - .github/workflows/copilot-setup-steps.yml
-
+    - .github/workflows/copilot-setup-steps.yml
 jobs:
   # The job MUST be named `copilot-setup-steps` or Copilot will not pick it up.
   copilot-setup-steps:
@@ -26,47 +24,42 @@ jobs:
       contents: read
     timeout-minutes: 59
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Go version is the single source of truth in go.work (first line: `go 1.25.7`).
-      # `go-version-file` keeps this in lockstep with the workspace automatically.
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.work
-          cache: true
-
-      # Node is needed for the npm ecosystem fixes under /api
-      # (package.json requires node >=22).
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: api/package-lock.json
-
-      - name: Install jq
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      # Pre-warm the bingo-managed tools (addlicense, goimports, golangci-lint,
-      # yamlfmt, templatize, ...) so the agent's first `make all-tidy` / `make lint`
-      # does not pay the cold-install cost (and cannot flake on a network hiccup).
-      # These targets are idempotent; failure here is non-fatal (Copilot continues).
-      - name: Pre-warm workspace tools and module cache
-        run: |
-          go work sync
-          # Download every module's deps up front to warm the module cache.
-          for dir in $(go list -f '{{.Dir}}' -m); do
-            (cd "$dir" && go mod download all) || true
-          done
-          # Bootstrap bingo tools via the Makefile (installs pinned versions).
-          make --silent licenses fmt >/dev/null 2>&1 || true
-          make --silent lint LINT_GOTAGS=E2Etests >/dev/null 2>&1 || true
-
-      # Install npm deps for the api workspace so npm audit / overrides work offline.
-      - name: Install api npm dependencies
-        working-directory: api
-        run: npm ci || npm install --package-lock-only
+    - name: Checkout code
+      uses: actions/checkout@v5
+    # Go version is the single source of truth in go.work (first line: `go 1.25.7`).
+    # `go-version-file` keeps this in lockstep with the workspace automatically.
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.work
+        cache: true
+    # Node is needed for the npm ecosystem fixes under /api
+    # (package.json requires node >=22).
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+        cache: "npm"
+        cache-dependency-path: api/package-lock.json
+    - name: Install jq
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+    # Pre-warm the bingo-managed tools (addlicense, goimports, golangci-lint,
+    # yamlfmt, templatize, ...) so the agent's first `make all-tidy` / `make lint`
+    # does not pay the cold-install cost (and cannot flake on a network hiccup).
+    # These targets are idempotent; failure here is non-fatal (Copilot continues).
+    - name: Pre-warm workspace tools and module cache
+      run: |
+        go work sync
+        # Download every module's deps up front to warm the module cache.
+        for dir in $(go list -f '{{.Dir}}' -m); do
+          (cd "$dir" && go mod download all) || true
+        done
+        # Bootstrap bingo tools via the Makefile (installs pinned versions).
+        make --silent licenses fmt >/dev/null 2>&1 || true
+        make --silent lint LINT_GOTAGS=E2Etests >/dev/null 2>&1 || true
+    # Install npm deps for the api workspace so npm audit / overrides work offline.
+    - name: Install api npm dependencies
+      working-directory: api
+      run: npm ci || npm install --package-lock-only
