@@ -42,6 +42,25 @@ make lint
 make verify        # deepcopy, json-format, yamlfmt, materialize, gomega, schema — what CI runs
 ```
 
+## 2a. Required checks — the agent MUST reproduce every gating CI check locally
+
+The PR is gated upstream by these Prow contexts. Run the mapped command in the
+Copilot environment and do not finish until each is green. This is the
+**definition of done** — a bump that only *looks* right but fails one of these is
+not done.
+
+| Prow required check      | Reproduce locally with                                   |
+|--------------------------|----------------------------------------------------------|
+| `ci/prow/verify`         | `make verify` **and** `make all-tidy` leaves a clean tree |
+| `ci/prow/lint`           | `make lint` (`LINT_GOTAGS=E2Etests`)                     |
+| `ci/prow/test-unit`      | `make test` (envtest auto-downloads)                     |
+| `ci/prow/mega-linter`    | `make verify-yamlfmt` + `git diff --exit-code` (yaml/format) |
+| `ci/prow/images`         | best-effort `make -C <changed svc> build` if a service dir changed |
+| `ci/prow/e2e-*`          | cannot run locally (needs a live Azure cluster) — a pure dep bump ships no runtime change; do NOT attempt, retest on flake |
+
+After all local checks pass, **mark the PR ready for review** (`gh pr ready
+<num>`) — an agent PR must not be left as a draft. Then drive it per §7.
+
 - **Generated-SDK modules** under `test/sdk/*` are **not** in the `go.work` `use`
   list. Building them inside the workspace fails; build/tidy them with
   `GOWORK=off`:
@@ -93,3 +112,27 @@ the linked JIRA. Call it out explicitly in the PR body.
   To rerun a single job comment `/test e2e-parallel` (the job short-name);
   `/retest <target>` is **rejected** by prow, plain `/retest` reruns all failed.
 - Push with `--force-with-lease`, never plain `--force`.
+
+## 7. Drive the PR to green (monitor loop — do not stop at "opened")
+
+Opening the PR is not the finish line. Follow the **`pr-merge-monitor`** skill:
+poll → classify → act until every required check is green and the PR is ready
+for a maintainer's `/lgtm`:
+
+1. After the fix is pushed and local checks pass, `gh pr ready <num>` so CI runs.
+2. `gh pr checks <num> --watch`. For each **red** required check:
+   - **Caused by this bump** (stale go.sum, tidy drift, a renamed API in the new
+     version, a lockfile mismatch) → apply the **minimum in-scope fix**, prefer
+     regenerating over hand-editing, re-run the mapped local check from §2a, then
+     `--force-with-lease` push.
+   - **Environmental flake** (`e2e-parallel` 20-min provisioning timeout,
+     `InvalidSubscriptionState`, proxy/IPv6 `go mod` errors) → prove scope (same
+     signature on unrelated PRs / prior green on same HEAD), then retest with an
+     evidence comment (`/test <job>`); never patch.
+3. Every mutating action (force-push, `/test`) needs a "why" PR comment with hard
+   evidence, and you must then confirm it took effect (new HEAD SHA / new build-id
+   pending). A posted comment is not proof of effect.
+4. Repeat until green. **Never** self-merge / force-merge / `/override`.
+
+Then create/attach the JIRA per the `jira-pr-workflow` skill and set the JIRA
+status (`Review` while open, `Release Pending` on merge, `Closed` only in prod).
