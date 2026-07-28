@@ -1,0 +1,261 @@
+name: Dependabot Remediation Dispatcher
+# Groups open Dependabot alerts by package and, for each group, opens ONE draft
+# PR and hands it to the Copilot coding agent, which pushes a grouped,
+# go.work-aware remediation onto the PR branch following
+# .github/instructions/dependabot-remediation.instructions.md.
+#
+# No tracking issues are created — the PR is the only artifact. The human
+# review/merge gate (branch protection `tide` + maintainer /lgtm) is always
+# preserved; this workflow never merges anything.
+#
+# PR-first trigger (proven on raelga/ARO-HCP 2026-07-21): the Copilot coding
+# agent starts autonomous work on an existing PR only when it is BOTH assigned
+# to copilot-swe-agent AND pinged with an `@copilot` comment. Assigning it to a
+# PR (unlike an issue) does not self-trigger; the comment emits
+# `copilot_work_started`. Both actions need a USER token (ASSIGN_TOKEN) — an App
+# installation / GITHUB_TOKEN cannot drive the agent.
+on:
+  schedule:
+  - cron: "0 6 * * 1" # Mondays 06:00 UTC, after the weekly Dependabot refresh
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Optional filter: severity (high|medium|low), ecosystem (go|pip|npm), package name, or CVE id. Empty = all."
+        required: false
+        default: ""
+      dry_run:
+        description: "List the proposed groups without opening PRs."
+        required: false
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: dependabot-remediation
+  cancel-in-progress: false
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: read # read Dependabot alerts
+      contents: write # create remediation branches (empty seed commit)
+      pull-requests: write # open the draft remediation PRs
+    # Exposed at job level because the `secrets` context is NOT allowed in a
+    # step-level `if:` — the `env` context is, so we gate the App-token step on
+    # env.DEPENDABOT_APP_ID instead.
+    env:
+      DEPENDABOT_APP_ID: ${{ secrets.DEPENDABOT_APP_ID }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+    # Preferred auth: a GitHub App installation token. The Azure/ARO-HCP org
+    # BLOCKS fine-grained PATs, so upstream this is the ONLY viable non-human
+    # token that can read Dependabot alerts. Use the Azure-owned App
+    # "aro-hcp-robot" (App ID 2853172). It must be granted these repository
+    # permissions (owner/org-admin action): "Dependabot alerts: read",
+    # "Contents: write" and "Pull requests: write". Set secrets
+    # DEPENDABOT_APP_ID (= 2853172) + DEPENDABOT_APP_PRIVATE_KEY, and install
+    # the App on the target repo. On a personal fork where PATs are allowed you
+    # may skip the App and set DEPENDABOT_REMEDIATION_TOKEN instead.
+    - name: Mint GitHub App token
+      id: app-token
+      if: ${{ env.DEPENDABOT_APP_ID != '' }}
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.DEPENDABOT_APP_ID }}
+        private-key: ${{ secrets.DEPENDABOT_APP_PRIVATE_KEY }}
+    - name: Group open alerts and open remediation PRs
+      env:
+        # A token that can READ Dependabot alerts AND create branches/PRs is
+        # REQUIRED: the built-in GITHUB_TOKEN is an "integration" and the
+        # Dependabot alerts REST API rejects it with 403 "Resource not
+        # accessible by integration" even with `security-events: read`.
+        # Order of preference:
+        #   1. GitHub App installation token (upstream: PATs are org-blocked).
+        #   2. DEPENDABOT_REMEDIATION_TOKEN (fine-grained PAT — fork/personal).
+        #   3. github.token — non-alert gh calls only; a run with no App/PAT
+        #      stops at the preflight below with a clear message.
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.DEPENDABOT_REMEDIATION_TOKEN || github.token }}
+        # USER token used ONLY to drive the Copilot coding agent (assign + the
+        # triggering `@copilot` comment). An App/GITHUB_TOKEN cannot: GitHub
+        # omits copilot-swe-agent from suggestedActors for them. Without it the
+        # draft PR is still opened and a human just comments `@copilot` to start.
+        ASSIGN_TOKEN: ${{ secrets.DEPENDABOT_REMEDIATION_TOKEN }}
+        FILTER: ${{ inputs.filter }}
+        # Safe by default: scheduled runs always do a harmless grouping preview.
+        # Only a manual dispatch with dry_run=false actually opens PRs.
+        DRY_RUN: ${{ github.event_name == 'schedule' && 'true' || inputs.dry_run }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        echo "::group::Preflight — verify Dependabot alert read access"
+        if ! gh api "repos/$REPO/dependabot/alerts?per_page=1" >/dev/null 2>&1; then
+          echo "::error::Cannot read Dependabot alerts for $REPO."
+          echo "::error::Configure a GitHub App (DEPENDABOT_APP_ID + DEPENDABOT_APP_PRIVATE_KEY)"
+          echo "::error::with 'Dependabot alerts: read' + 'Contents: write' + 'Pull requests: write'"
+          echo "::error::— required upstream where fine-grained PATs are org-blocked. On a personal"
+          echo "::error::fork you may instead set DEPENDABOT_REMEDIATION_TOKEN to a fine-grained PAT."
+          echo "::error::The built-in GITHUB_TOKEN is rejected by the Dependabot alerts API"
+          echo "::error::(403 'Resource not accessible by integration')."
+          exit 1
+        fi
+        echo "::endgroup::"
+
+        echo "::group::List open Dependabot alerts"
+        gh api "repos/$REPO/dependabot/alerts" --paginate --jq '
+          .[] | select(.state == "open") | {
+            number,
+            cve: .security_advisory.cve_id,
+            ghsa: .security_advisory.ghsa_id,
+            severity: .security_advisory.severity,
+            package: .security_vulnerability.package.name,
+            ecosystem: .security_vulnerability.package.ecosystem,
+            fixed: .security_vulnerability.first_patched_version.identifier,
+            manifest: .dependency.manifest_path
+          }' | jq -s '.' > alerts.json
+        echo "open alerts: $(jq length alerts.json)"
+        echo "::endgroup::"
+
+        echo "::group::Group by package family"
+        # One group per package family. Sibling packages that MUST move in
+        # lockstep (k8s.io/*, sigs.k8s.io/*, azure-sdk-for-go/*, aws-sdk-go-v2/*,
+        # opentelemetry otel/*, golang.org/x/*) are collapsed onto a single
+        # family key so they land in ONE PR — bumping one without the others
+        # breaks `go work sync`. Everything else keys on its exact package name.
+        jq '
+          def familykey(p):
+            if   (p | startswith("k8s.io/"))                       then "k8s.io/*"
+            elif (p | startswith("sigs.k8s.io/"))                  then "sigs.k8s.io/*"
+            elif (p | startswith("github.com/Azure/azure-sdk-for-go")) then "azure-sdk-for-go/*"
+            elif (p | startswith("github.com/aws/aws-sdk-go-v2"))  then "aws-sdk-go-v2/*"
+            elif (p | startswith("go.opentelemetry.io/"))          then "opentelemetry/*"
+            elif (p | startswith("golang.org/x/"))                 then "golang.org/x/*"
+            else p end;
+          [ .[] | . + {family: familykey(.package)} ]
+          | group_by(.family)
+          | map({
+              family: .[0].family,
+              packages: ([.[].package] | unique),
+              ecosystem: .[0].ecosystem,
+              alerts: [.[].number],
+              cves: ([.[].cve] | map(select(. != null)) | unique),
+              fixed: ([.[].fixed] | map(select(. != null)) | unique),
+              has_fix: (any(.[].fixed; . != null)),
+              severity: ([.[].severity] | max_by(
+                  (if . == "critical" then 4 elif . == "high" then 3
+                   elif . == "medium" then 2 else 1 end)))
+            })
+          | sort_by(if .severity == "critical" then 4 elif .severity == "high" then 3
+                    elif .severity == "medium" then 2 else 1 end)
+          | reverse
+        ' alerts.json > groups.json
+        jq -r '.[] | "  \(.severity)\t\(.family)\t\(.packages|length) pkg / \(.alerts|length) alert(s)\thas_fix=\(.has_fix)"' groups.json
+        echo "::endgroup::"
+
+        if [ -n "$FILTER" ]; then
+          jq --arg f "$FILTER" '[.[] | select(
+            (.family | test($f; "i")) or (.packages[] | test($f; "i")) or
+            (.ecosystem == $f) or (.severity == $f) or (.cves[]? | test($f; "i")))]' groups.json > groups.filtered.json
+          mv groups.filtered.json groups.json
+        fi
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "DRY RUN — no PRs opened. Proposed groups:"
+          jq -r '.[] | "- \(.family) (\(.severity)): \(.packages|length) pkg, \(.alerts|length) alert(s), fix=\(.has_fix)"' groups.json
+          exit 0
+        fi
+
+        echo "::group::Ensure labels exist"
+        gh label create dependabot-remediation --repo "$REPO" --color 0e8a16 \
+          --description "Automated Dependabot remediation" --force >/dev/null 2>&1 || true
+        gh label create security --repo "$REPO" --color d93f0b \
+          --description "Security" --force >/dev/null 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Resolve Copilot coding-agent id"
+        # Assigning / triggering the Copilot coding agent requires a USER token;
+        # the App installation token / GITHUB_TOKEN cannot (GitHub omits
+        # copilot-swe-agent from suggestedActors for them). Use ASSIGN_TOKEN.
+        copilot_id=""
+        if [ -n "${ASSIGN_TOKEN:-}" ]; then
+          copilot_id=$(GH_TOKEN="$ASSIGN_TOKEN" gh api graphql -f query='query($o:String!,$n:String!){repository(owner:$o,name:$n){suggestedActors(capabilities:[CAN_BE_ASSIGNED],first:50){nodes{login __typename ... on Bot{id}}}}}' \
+            -f o="${REPO%/*}" -f n="${REPO#*/}" \
+            --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id' 2>/dev/null || true)
+        fi
+        [ -n "$copilot_id" ] && echo "copilot-swe-agent id resolved" || echo "no ASSIGN_TOKEN — PRs will need a human @copilot ping"
+        echo "::endgroup::"
+
+        echo "::group::Open remediation PRs and dispatch to Copilot"
+        base_sha=$(gh api "repos/$REPO/git/refs/heads/main" --jq '.object.sha')
+        base_tree=$(gh api "repos/$REPO/git/commits/$base_sha" --jq '.tree.sha')
+
+        jq -c '.[]' groups.json | while read -r g; do
+          family=$(echo "$g"   | jq -r '.family')
+          sev=$(echo "$g"      | jq -r '.severity')
+          has_fix=$(echo "$g"  | jq -r '.has_fix')
+          n_alerts=$(echo "$g" | jq -r '.alerts | length')
+          pkglist=$(echo "$g"  | jq -r '.packages | join(", ")')
+          alerts=$(echo "$g"   | jq -r '.alerts | map("#\(.)") | join(", ")')
+          cves=$(echo "$g"     | jq -r '.cves | join(", ")')
+          fixed=$(echo "$g"    | jq -r '.fixed | join(", ")')
+          # Branch/label-safe slug from the family key.
+          slug=$(echo "$family" | tr '/' '-' | tr -cd 'A-Za-z0-9._-' | sed 's/--*/-/g;s/-$//')
+          branch="deps/agent/${slug}"
+          title="deps: remediate ${family} (${sev}, ${n_alerts} alert(s))"
+
+          # Skip if a remediation PR/branch for this family already exists.
+          if gh api "repos/$REPO/git/refs/heads/${branch}" >/dev/null 2>&1; then
+            echo "exists: branch ${branch} — skipping ${family}"; continue
+          fi
+          existing_pr=$(gh pr list --repo "$REPO" --state open --head "$branch" --json number --jq '.[0].number' || true)
+          if [ -n "$existing_pr" ]; then echo "exists: PR #$existing_pr ($family)"; continue; fi
+
+          # Seed the branch with a single empty commit so a draft PR can be
+          # opened (a PR needs >=1 commit distinct from base; the agent then
+          # force-pushes the real fix on top).
+          seed_sha=$(gh api "repos/$REPO/git/commits" \
+            -f message="chore: seed branch for agentic ${family} remediation" \
+            -f tree="$base_tree" -f parents[]="$base_sha" --jq '.sha')
+          gh api "repos/$REPO/git/refs" -f ref="refs/heads/${branch}" -f sha="$seed_sha" >/dev/null
+
+          body=$(cat <<EOF
+        ## Automated Dependabot remediation — \`${family}\`
+
+        @copilot please remediate this group following
+        \`.github/instructions/dependabot-remediation.instructions.md\`.
+
+        - **Package(s):** ${pkglist} (${sev})
+        - **Fixed version(s):** ${fixed:-none available}
+        - **CVEs:** ${cves:-n/a}
+        - **Dependabot alerts:** ${alerts}
+        - **Has patched version:** ${has_fix}
+
+        Steps: bump the whole family to a single compatible version across ALL
+        affected modules, run \`make all-tidy\` + \`make test-compile\` + \`make lint\`
+        (and \`go work sync\`), push the grouped fix onto THIS PR branch, link a
+        Vulnerability JIRA, and \`Closes\` any superseded native-Dependabot PRs.
+
+        $( [ "$has_fix" = "false" ] && echo "> No patched version exists — dismiss the alert(s) with justification and track in JIRA instead of faking a fix." )
+        EOF
+        )
+          url=$(gh pr create --repo "$REPO" --draft --base main --head "$branch" \
+                --title "$title" --body "$body" \
+                --label dependabot-remediation --label security)
+          num=$(basename "$url")
+          echo "opened PR #$num for $family"
+
+          # Drive the coding agent: assign + `@copilot` comment (both trigger
+          # bits are required for a PR — assignment alone does not self-start).
+          if [ -n "$copilot_id" ]; then
+            pr_id=$(gh api "repos/$REPO/pulls/$num" --jq '.node_id')
+            GH_TOKEN="$ASSIGN_TOKEN" gh api graphql -f query='mutation($a:ID!,$actor:ID!){replaceActorsForAssignable(input:{assignableId:$a,actorIds:[$actor]}){assignable{... on PullRequest{number}}}}' \
+              -f a="$pr_id" -f actor="$copilot_id" >/dev/null 2>&1 || true
+            GH_TOKEN="$ASSIGN_TOKEN" gh api "repos/$REPO/issues/$num/comments" \
+              -f body="@copilot please start the remediation described above and push the fix to this PR branch." >/dev/null 2>&1 || true
+            echo "dispatched Copilot on #$num"
+          else
+            echo "no ASSIGN_TOKEN — #$num opened; a human must comment @copilot to start"
+          fi
+        done
+        echo "::endgroup::"
