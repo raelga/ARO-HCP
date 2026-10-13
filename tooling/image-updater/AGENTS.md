@@ -14,6 +14,21 @@ Refer to that file for the authoritative list of component and group names.
 ACM-related components (those whose names start with `acm-`) require extra
 post-bump steps described below.
 
+### Sync Fork (required first step)
+
+Before creating a branch or bumping images, sync your fork with upstream `main`
+so the bump is based on current Azure/ARO-HCP and PRs do not need a manual rebase.
+
+```bash
+# One-time: git remote add upstream https://github.com/Azure/ARO-HCP.git
+git fetch upstream
+git checkout main
+git merge upstream/main
+git push origin main
+```
+
+Only after `main` matches `upstream/main`, create the bump branch from `main`.
+
 ### Branch Strategy
 
 All bump work MUST happen on a dedicated branch, never on main. Create a branch
@@ -165,3 +180,6 @@ status in the relevant release channel before merging any upgrade PR.
 - Some images require Azure auth (`useAuth: true`). Make sure `az` is logged in.
 - Private Quay.io and generic registry credentials are read from `~/.docker/config.json`.
 - Use `-v 2` for debug output if an update fails silently.
+
+
+[You have received this identical output 3 times. Re-reading 'tooling/image-updater/AGENTS.md:raw' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]
