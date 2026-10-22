@@ -303,7 +303,7 @@ resource arohcpClusterProvisionSloWindowedErrorAlerts 'Microsoft.AlertsManagemen
         labels: {
           component: 'slo'
           long_window: '1h'
-          severity: '3'
+          severity: '2'
           short_window: '5m'
           slo: 'cluster-provision-errors'
         }
@@ -317,7 +317,7 @@ resource arohcpClusterProvisionSloWindowedErrorAlerts 'Microsoft.AlertsManagemen
         }
         expression: 'errors:backend_cluster_provision:failed_1h >= 3 and errors:backend_cluster_provision:error_rate_1h > 0.72'
         for: 'PT5M'
-        severity: severityCeiling > 0 ? max(3, severityCeiling) : 3
+        severity: severityCeiling > 0 ? max(2, severityCeiling) : 2
       }
       {
         actions: [
@@ -334,7 +334,7 @@ resource arohcpClusterProvisionSloWindowedErrorAlerts 'Microsoft.AlertsManagemen
         labels: {
           component: 'slo'
           long_window: '6h'
-          severity: '3'
+          severity: '2'
           short_window: '30m'
           slo: 'cluster-provision-errors'
         }
@@ -348,7 +348,7 @@ resource arohcpClusterProvisionSloWindowedErrorAlerts 'Microsoft.AlertsManagemen
         }
         expression: 'errors:backend_cluster_provision:total_6h >= 5 and errors:backend_cluster_provision:error_rate_6h > 0.3'
         for: 'PT30M'
-        severity: severityCeiling > 0 ? max(3, severityCeiling) : 3
+        severity: severityCeiling > 0 ? max(2, severityCeiling) : 2
       }
       {
         actions: [
@@ -442,15 +442,15 @@ resource rpUserJourneyClusterUpgradeMonitorRules 'Microsoft.AlertsManagement/pro
         }
         annotations: {
           correlationId: 'userJourneyClusterUpgradeStuckInDesired/{{ $labels.cluster }}{{ $labels.resource_id }}/{{ $labels.version }}'
-          description: '''Cluster upgrade target version {{ $labels.version }} has been in desired for over 20 minutes without reaching partial. With the alert pending for 5 minutes, paging starts after ~25 minutes. Partial is when the target version becomes active (recognized as active) on the HCP cluster; the upgrade is in progress but not yet complete. Investigate backend_cluster_version_info on the affected cluster.
+          description: '''Cluster version change (upgrade or rollback) to {{ $labels.version }} has been in desired for over 20 minutes without reaching partial. With the alert pending for 5 minutes, paging starts after ~25 minutes. Partial is when the target version becomes active (recognized as active) on the HCP cluster; the version change is in progress but not yet complete. Investigate backend_cluster_version_info on the affected cluster.
 Service Cluster: {{ $labels.cluster }}
 '''
-          info: '''Cluster upgrade target version {{ $labels.version }} has been in desired for over 20 minutes without reaching partial. With the alert pending for 5 minutes, paging starts after ~25 minutes. Partial is when the target version becomes active (recognized as active) on the HCP cluster; the upgrade is in progress but not yet complete. Investigate backend_cluster_version_info on the affected cluster.
+          info: '''Cluster version change (upgrade or rollback) to {{ $labels.version }} has been in desired for over 20 minutes without reaching partial. With the alert pending for 5 minutes, paging starts after ~25 minutes. Partial is when the target version becomes active (recognized as active) on the HCP cluster; the version change is in progress but not yet complete. Investigate backend_cluster_version_info on the affected cluster.
 Service Cluster: {{ $labels.cluster }}
 '''
           runbook_url: 'https://aka.ms/arohcp-runbook-cluster-upgrade'
-          summary: '{{ $labels.cluster }}: Cluster upgrade on {{ $labels.resource_id }} to version {{ $labels.version }} not progressing'
-          title: '{{ $labels.cluster }}: Cluster upgrade on {{ $labels.resource_id }} to version {{ $labels.version }} not progressing'
+          summary: '{{ $labels.cluster }}: Cluster version change on {{ $labels.resource_id }} to version {{ $labels.version }} not progressing'
+          title: '{{ $labels.cluster }}: Cluster version change on {{ $labels.resource_id }} to version {{ $labels.version }} not progressing'
         }
         expression: 'hosted_control_plane_upgrade:duration_in_desired:seconds > 1200'
         for: 'PT5M'
@@ -475,15 +475,15 @@ Service Cluster: {{ $labels.cluster }}
         }
         annotations: {
           correlationId: 'userJourneyClusterUpgradeStuckInProgress/{{ $labels.cluster }}{{ $labels.resource_id }}/{{ $labels.version }}'
-          description: '''Cluster upgrade target version {{ $labels.version }} has been in progress for over 30 minutes without reaching completed. With the alert pending for 5 minutes, paging starts after ~35 minutes. Completed is when the target version upgrade has finished and is reported as complete on the HCP cluster. Investigate backend_cluster_version_info on the affected cluster.
+          description: '''Cluster version change (upgrade or rollback) to {{ $labels.version }} has been in progress for over 30 minutes without reaching completed. With the alert pending for 5 minutes, paging starts after ~35 minutes. Completed is when the target version change has finished and is reported as complete on the HCP cluster. Investigate backend_cluster_version_info on the affected cluster.
 Service Cluster: {{ $labels.cluster }}
 '''
-          info: '''Cluster upgrade target version {{ $labels.version }} has been in progress for over 30 minutes without reaching completed. With the alert pending for 5 minutes, paging starts after ~35 minutes. Completed is when the target version upgrade has finished and is reported as complete on the HCP cluster. Investigate backend_cluster_version_info on the affected cluster.
+          info: '''Cluster version change (upgrade or rollback) to {{ $labels.version }} has been in progress for over 30 minutes without reaching completed. With the alert pending for 5 minutes, paging starts after ~35 minutes. Completed is when the target version change has finished and is reported as complete on the HCP cluster. Investigate backend_cluster_version_info on the affected cluster.
 Service Cluster: {{ $labels.cluster }}
 '''
           runbook_url: 'https://aka.ms/arohcp-runbook-cluster-upgrade'
-          summary: '{{ $labels.cluster }}: Cluster upgrade on {{ $labels.resource_id }} to version {{ $labels.version }} stuck'
-          title: '{{ $labels.cluster }}: Cluster upgrade on {{ $labels.resource_id }} to version {{ $labels.version }} stuck'
+          summary: '{{ $labels.cluster }}: Cluster version change on {{ $labels.resource_id }} to version {{ $labels.version }} stuck'
+          title: '{{ $labels.cluster }}: Cluster version change on {{ $labels.resource_id }} to version {{ $labels.version }} stuck'
         }
         expression: 'hosted_control_plane_upgrade:duration_in_progress:seconds > 1800'
         for: 'PT5M'
@@ -720,7 +720,7 @@ resource arohcpFrontendSloErrorAlerts 'Microsoft.AlertsManagement/prometheusRule
         labels: {
           component: 'slo'
           long_window: '1h'
-          severity: '3'
+          severity: '2'
           short_window: '5m'
           slo: 'frontend-errors'
         }
@@ -734,7 +734,7 @@ resource arohcpFrontendSloErrorAlerts 'Microsoft.AlertsManagement/prometheusRule
         }
         expression: '((sum by (cluster, region) (rate(frontend_http_requests_total{code=~"5..",route!~".*hcpoperation(results|statuses).*"}[1h] offset 5m)) / sum by (cluster, region) (rate(frontend_http_requests_total{route!~".*hcpoperation(results|statuses).*"}[1h] offset 5m))) > 0.0072 and on (cluster) (sum by (cluster, region) (rate(frontend_http_requests_total{code=~"5..",route!~".*hcpoperation(results|statuses).*"}[5m] offset 5m)) / sum by (cluster, region) (rate(frontend_http_requests_total{route!~".*hcpoperation(results|statuses).*"}[5m] offset 5m))) > 0.0072)'
         for: 'PT2M'
-        severity: severityCeiling > 0 ? max(3, severityCeiling) : 3
+        severity: severityCeiling > 0 ? max(2, severityCeiling) : 2
       }
       {
         actions: [
@@ -751,7 +751,7 @@ resource arohcpFrontendSloErrorAlerts 'Microsoft.AlertsManagement/prometheusRule
         labels: {
           component: 'slo'
           long_window: '6h'
-          severity: '3'
+          severity: '2'
           short_window: '30m'
           slo: 'frontend-errors'
         }
@@ -765,7 +765,7 @@ resource arohcpFrontendSloErrorAlerts 'Microsoft.AlertsManagement/prometheusRule
         }
         expression: '((sum by (cluster, region) (rate(frontend_http_requests_total{code=~"5..",route!~".*hcpoperation(results|statuses).*"}[6h] offset 5m)) / sum by (cluster, region) (rate(frontend_http_requests_total{route!~".*hcpoperation(results|statuses).*"}[6h] offset 5m))) > 0.003 and on (cluster) (sum by (cluster, region) (rate(frontend_http_requests_total{code=~"5..",route!~".*hcpoperation(results|statuses).*"}[30m] offset 5m)) / sum by (cluster, region) (rate(frontend_http_requests_total{route!~".*hcpoperation(results|statuses).*"}[30m] offset 5m))) > 0.003)'
         for: 'PT15M'
-        severity: severityCeiling > 0 ? max(3, severityCeiling) : 3
+        severity: severityCeiling > 0 ? max(2, severityCeiling) : 2
       }
       {
         actions: [

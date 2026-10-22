@@ -30,7 +30,7 @@ az account set --subscription 1d3378d3-5a3f-4712-85a1-2485495dfc4b
 
 The following additional tools are also required:
 
-- `make`
+- GNU Make 4.x or newer - macOS's bundled GNU Make 3.81 fails with "multiple target patterns" at `test/Makefile:77`. Install with `brew install make` and use `gmake`, or put `$(brew --prefix make)/libexec/gnubin` first on `PATH`.
 - `kubectl` at the latest version - use `az aks install-cli` to add this to your system
 
 All other tools should be transparently installed by the `make` targets that require them - if you find any missing dependencies, please send a pull request to make sure that the next person to onboard doesn't hit any issues!
@@ -44,7 +44,7 @@ All other tools should be transparently installed by the `make` targets that req
 > [!CAUTION] Cleanup-sensitive naming patterns
 > The following resource group naming patterns trigger special cleanup rules. Avoid them for custom `DEPLOY_ENV` values or ad-hoc resource groups. See [`resourcegroups.policy.yaml`](../tooling/cleanup-sweeper/resourcegroups.policy.yaml) for details.
 >
-> **Prefixes:** `hcp-underlay-pers-`, `hcp-underlay-prow-`, `hcp-underlay-ci`, `hcp-underlay-cspr-`, `hcp-underlay-dev-`, `hcp-underlay-perf-`, `hcp-underlay-int-`, `hcp-underlay-stg-`, `hcp-underlay-prod-`
+> **Prefixes:** `hcp-underlay-pers-`, `hcp-underlay-prow-`, `hcp-underlay-ci`, `hcp-underlay-dev-`, `hcp-underlay-perf-`, `hcp-underlay-int-`, `hcp-underlay-stg-`, `hcp-underlay-prod-`
 >
 > **Suffixes:** `-shared-resources`
 
@@ -62,6 +62,15 @@ This command creates a personal DEV environment with a unique name that is deriv
 
 > [!TIP] Make Options
 > [Make Options](./make-options.md) describes how to customize the make build e.g. by defining the container engine to be used or limiting parallel jobs. This can be of help when experiencing problems with the build.
+
+### Service Cluster Node Pools
+
+New personal DEV service clusters run all workloads on one autoscaling system pool of three to five `Standard_D4ds_v5` nodes (`svc.aks.systemPoolOnly`), as the CI service clusters do. See [Service Cluster Consolidation](ci/system-pool-only.md) for the placement details. The management cluster is unchanged.
+
+> [!IMPORTANT]
+> A personal environment created before this change cannot be redeployed. Its system pool was created as `Standard_D2s_v3` with a 32 GB OS disk, and AKS does not allow either property to change on an existing pool, so the service-cluster deployment fails with `PropertyChangeNotAllowed`. Delete and recreate the environment to pick up this topology — personal environments are meant to be short-lived. If you need to keep an existing one running, set `svc.aks.systemPoolOnly` to `false` and remove the `systemAgentPool` override in the `pers` section of your local `config/config.yaml`.
+
+Note also that redeploying would not consolidate such a cluster even if the system pool were compatible: ARM does not delete the user and infra pools once the Bicep stops emitting them.
 
 ### Local Cluster Service Development Setup
 
