@@ -507,6 +507,9 @@ require('node:vm').runInNewContext(` + string(encodedScript) + `, {
 	window:{innerHeight:1000,scrollY:0,addEventListener:()=>{}}
 });
 const content = state.tooltip.formatter([{seriesId:'timing-tests',dataIndex:0}]);
+assert.equal(content.style.maxHeight, (chart.height - 32) + 'px', 'the detail uses the chart height, not a fixed cap');
+assert.equal(content.style.scrollbarWidth, 'thin', 'overflow must show a visible scrollbar');
+assert.match(String(content.style.scrollbarColor), /transparent/);
 const descendants = node => [node, ...node.children.flatMap(descendants)];
 const nodes = descendants(content);
 assert.ok(content.textContent.includes('<img src=x onerror=alert(1)> & "quoted"'));

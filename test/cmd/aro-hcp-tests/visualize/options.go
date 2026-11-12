@@ -643,7 +643,10 @@ func timingChartSortingJS(chart string, groups []timingChartGroup, totalDuration
 			if (text !== undefined) node.textContent = text;
 			return node;
 		};
-		const content = element('div', {width:'min(720px, 80vw)', maxHeight:Math.max(1, Math.min(520, chart.getHeight() - 32)) + 'px', overflowY:'auto', whiteSpace:'normal', fontSize:'12px', lineHeight:'1.4'});
+		/* The panel uses the chart height it already has; a fixed cap hid the tail of the
+		   longer stage lists. The scrollbar is styled because overlay scrollbars are
+		   invisible until scrolled, which reads as truncated content. */
+		const content = element('div', {width:'min(720px, 80vw)', maxHeight:Math.max(1, chart.getHeight() - 32) + 'px', overflowY:'auto', scrollbarWidth:'thin', scrollbarColor:'rgba(128,128,128,0.55) transparent', whiteSpace:'normal', fontSize:'12px', lineHeight:'1.4'});
 		content.append(
 			element('div', {fontWeight:'600', fontSize:'14px', overflowWrap:'anywhere'}, test.name),
 			element('div', {opacity:'0.75', margin:'4px 0 12px'}, 'Total duration: ' + formatDuration(duration))
