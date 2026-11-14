@@ -21,9 +21,6 @@ services:
       children:
       - serviceGroup: Microsoft.Azure.ARO.HCP.Service.Infra
         children:
-        - serviceGroup: Microsoft.Azure.ARO.HCP.Maestro.Server
-          pipelinePath: maestro/server/pipeline.yaml
-          purpose: Deploy the Maestro Server.
         - serviceGroup: Microsoft.Azure.ARO.HCP.ClusterService
           pipelinePath: cluster-service/pipeline.yaml
           purpose: Deploy Cluster Service.

@@ -8,21 +8,6 @@ Execution scope: the resourcegroup of the AKS cluster where the maestro server
 will be deployed.
 */
 
-param maestroInfraResourceGroup string
-param maestroEventGridNamespaceName string
-param certKeyVaultName string
-param certKeyVaultResourceGroup string
-param certKeyVaultSubscription string = subscription().subscriptionId
-
-@description('The subject alternative name of the certificate')
-param certificateSAN string
-
-@description('The issuer of the certificate.')
-param certificateIssuer string
-
-@description('The name of the MQTT client that will be created in the EventGrid Namespace')
-param mqttClientName string
-
 @description('Whether to deploy the Postgres server for Maestro')
 param deployPostgres bool
 
@@ -64,9 +49,6 @@ param privateEndpointResourceGroup string = ''
 
 @description('The name of the database to create for Maestro')
 param maestroDatabaseName string
-
-@description('The principal ID of the Managed Identity for the Maestro cluster service')
-param maestroServerManagedIdentityPrincipalId string
 
 @description('The resource ID of the managed identity used to manage the Postgres server')
 param postgresAdministrationManagedIdentityId string
@@ -166,47 +148,7 @@ module maestroPostgres '../postgres/postgres.bicep' = if (deployPostgres) {
 // svc-pipeline.yaml (the deploymentScript-based modules were removed for
 // SFI-ID4.2.1 compliance).
 
-//
-//   C E R T I F I C A T E   A C C E S S
-//
+// Maestro is retired. The server deployment, Event Grid client registration and
+// certificate access were removed with it; this module now only owns the optional
+// Postgres instance.
 
-module certSecretAccess '../keyvault/key-vault-secret-access.bicep' = {
-  name: 'maestro-cert-access-${uniqueString(mqttClientName)}'
-  scope: resourceGroup(certKeyVaultSubscription, certKeyVaultResourceGroup)
-  params: {
-    keyVaultName: certKeyVaultName
-    secretName: mqttClientName
-    principalId: maestroServerManagedIdentityPrincipalId
-  }
-}
-
-//
-//   C E R T I F I C A T E   T H U M B P R I N T
-//
-
-resource certKv 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  scope: resourceGroup(certKeyVaultSubscription, certKeyVaultResourceGroup)
-  name: certKeyVaultName
-}
-
-resource certSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' existing = {
-  parent: certKv
-  name: mqttClientName
-}
-
-//
-//   E V E N T G R I D   A C C E S S
-//
-
-module evengGridAccess 'maestro-eventgrid-access.bicep' = {
-  name: 'maestro-eg-access-${uniqueString(mqttClientName)}'
-  scope: resourceGroup(maestroInfraResourceGroup)
-  params: {
-    eventGridNamespaceName: maestroEventGridNamespaceName
-    clientName: mqttClientName
-    clientRole: 'server'
-    certificateSAN: certificateSAN
-    certificateIssuer: certificateIssuer
-    certificateThumbprint: certSecret.?tags.?thumbprint ?? ''
-  }
-}
