@@ -292,9 +292,13 @@ DEV/dev-xs slot-manager jobs use the dedicated asset described in the
 [slot-manager design](../../test/cmd/aro-hcp-tests/slot-manager/DESIGN.md#dedicated-dev-mock-identities).
 New jobs consume its bundle, not legacy static-pool leases. Personal-dev
 shared-principal configuration remains supported. Old in-flight jobs retain their
-old checked-out consumers, while legacy Boskos leases still gate concurrency.
-All legacy pool infrastructure described above remains unchanged. Do not expand old pools
-to satisfy slot demand; capacity and retirement are a separate follow-up.
+old checked-out consumers.
+
+The legacy DEV pools are retired. `armHelperPool` and `pool` are configured with
+`size: 0`, so the privileged pipeline creates no members, and the Boskos catalogs
+`arm-helper-pool.yaml` and `msi-mock-pool.yaml` no longer exist. The existing pool
+applications and their certificates are deleted separately, because decreasing a
+pool size does not delete higher-index resources.
 
 ### Dedicated slot identity operations
 
