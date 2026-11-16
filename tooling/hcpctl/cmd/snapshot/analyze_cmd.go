@@ -46,12 +46,15 @@ type RawAnalyzeOptions struct {
 	DataDir             string
 	AROHCPPath          string
 	HypershiftPath      string
-	MaestroPath         string
 	ClustersServicePath string
 	ReviewRounds        int
 	MaxRounds           int
 	Output              string
 	Model               string
+
+	// ReasoningEffort optionally sets the model's reasoning effort for any
+	// provider. Allowed values depend on the provider; empty keeps defaults.
+	ReasoningEffort string
 
 	// Intent/IntentFile provide a free-form investigation objective (e.g. a
 	// customer complaint). When set, the analysis runs in intent mode instead
@@ -70,10 +73,11 @@ type RawAnalyzeOptions struct {
 	Provider string
 
 	// Copilot-specific options.
-	AuthMode        string
-	GitHubTokenFile string
-	ModelEndpoint   string
-	ModelDeployment string
+	AuthMode          string
+	GitHubTokenFile   string
+	ModelEndpoint     string
+	ModelDeployment   string
+	ContextWindowSize string
 
 	// Claude-specific options.
 	AnthropicAPIKeyFile string
@@ -97,12 +101,13 @@ func defaultAnalyzeOptions() *RawAnalyzeOptions {
 func bindAnalyzeOptions(opts *RawAnalyzeOptions, cmd *cobra.Command) error {
 	cmd.Flags().StringVar(&opts.AROHCPPath, "aro-hcp", opts.AROHCPPath, "Path to ARO-HCP git checkout (required)")
 	cmd.Flags().StringVar(&opts.HypershiftPath, "hypershift", opts.HypershiftPath, "Path to HyperShift git checkout (required)")
-	cmd.Flags().StringVar(&opts.MaestroPath, "maestro", opts.MaestroPath, "Path to Maestro git checkout (required)")
+	cmd.Flags().String("maestro", "", "Does nothing; retained only for backwards compatibility")
 	cmd.Flags().StringVar(&opts.ClustersServicePath, "clusters-service", opts.ClustersServicePath, "Path to Clusters Service git checkout (required)")
 	cmd.Flags().IntVar(&opts.ReviewRounds, "review-rounds", opts.ReviewRounds, "Number of review rounds")
 	cmd.Flags().IntVar(&opts.MaxRounds, "max-rounds", opts.MaxRounds, "Maximum validation rounds per cycle")
 	cmd.Flags().StringVar(&opts.Output, "output", opts.Output, "Output directory for analysis results (defaults to data-dir)")
 	cmd.Flags().StringVar(&opts.Model, "model", opts.Model, "Override the model (applies to all providers)")
+	cmd.Flags().StringVar(&opts.ReasoningEffort, "effort", opts.ReasoningEffort, "Reasoning effort for models that support it (applies to all providers; defaults to the model's own default). copilot: "+strings.Join(agent.CopilotReasoningEfforts, ", ")+"; claude and claude-code: "+strings.Join(agent.ClaudeReasoningEfforts, ", "))
 
 	cmd.Flags().StringVar(&opts.Intent, "intent", opts.Intent, "Free-form investigation objective (e.g. a customer complaint). When set, analyzes the snapshot against this objective instead of assuming a failed e2e test. Mutually exclusive with --intent-file.")
 	cmd.Flags().StringVar(&opts.IntentFile, "intent-file", opts.IntentFile, "Path to a file containing the free-form investigation objective. Mutually exclusive with --intent.")
@@ -118,6 +123,7 @@ func bindAnalyzeOptions(opts *RawAnalyzeOptions, cmd *cobra.Command) error {
 	cmd.Flags().StringVar(&opts.GitHubTokenFile, "github-token-file", opts.GitHubTokenFile, "Path to file containing GitHub token (required for token auth mode)")
 	cmd.Flags().StringVar(&opts.ModelEndpoint, "model-endpoint", opts.ModelEndpoint, "Azure AI Foundry endpoint URL (required for byok auth mode)")
 	cmd.Flags().StringVar(&opts.ModelDeployment, "model-deployment", opts.ModelDeployment, "Model deployment name (required for byok auth mode)")
+	cmd.Flags().StringVar(&opts.ContextWindowSize, "context-window-size", opts.ContextWindowSize, "Maximum input tokens including instructions, history, and tools (Copilot BYOK only; e.g. 128000, 200k, 900k; k=1000; empty or 0 keeps the runtime default)")
 
 	// Claude-specific flags.
 	cmd.Flags().StringVar(&opts.AnthropicAPIKeyFile, "anthropic-api-key-file", opts.AnthropicAPIKeyFile, "Path to file containing the Anthropic API key (claude or claude-code; otherwise use environment/CLI authentication)")
@@ -126,7 +132,7 @@ func bindAnalyzeOptions(opts *RawAnalyzeOptions, cmd *cobra.Command) error {
 	cmd.Flags().StringVar(&opts.VertexProject, "vertex-project", opts.VertexProject, "GCP project ID for claude or claude-code Vertex AI (env: GOOGLE_VERTEX_PROJECT_ID)")
 	cmd.Flags().StringVar(&opts.VertexRegion, "vertex-region", opts.VertexRegion, "GCP region for claude or claude-code Vertex AI (env: GOOGLE_VERTEX_REGION)")
 
-	for _, flag := range []string{"aro-hcp", "hypershift", "maestro", "clusters-service"} {
+	for _, flag := range []string{"aro-hcp", "hypershift", "clusters-service"} {
 		if err := cmd.MarkFlagRequired(flag); err != nil {
 			return fmt.Errorf("failed to mark %s as required: %w", flag, err)
 		}
@@ -157,6 +163,15 @@ type validatedAnalyzeOptions struct {
 }
 
 func (o *RawAnalyzeOptions) validate() (*validatedAnalyzeOptions, error) {
+	maxPromptTokens, err := agent.ParseTokenCount(o.ContextWindowSize)
+	if err != nil {
+		return nil, fmt.Errorf("--context-window-size: %w", err)
+	}
+	if o.ContextWindowSize != "" {
+		if (o.Provider != "" && o.Provider != providerCopilot) || o.AuthMode != agent.CopilotAuthModeBYOK {
+			return nil, fmt.Errorf("--context-window-size requires --provider=copilot --auth-mode=byok")
+		}
+	}
 	if o.DataDir == "" {
 		return nil, fmt.Errorf("data-dir argument is required")
 	}
@@ -171,7 +186,6 @@ func (o *RawAnalyzeOptions) validate() (*validatedAnalyzeOptions, error) {
 	worktreePaths := map[string]string{
 		"ARO-HCP":          o.AROHCPPath,
 		"hypershift":       o.HypershiftPath,
-		"maestro":          o.MaestroPath,
 		"clusters-service": o.ClustersServicePath,
 	}
 	for name, path := range worktreePaths {
@@ -234,12 +248,17 @@ func (o *RawAnalyzeOptions) validate() (*validatedAnalyzeOptions, error) {
 	// Validate provider-specific options.
 	switch o.Provider {
 	case providerCopilot, "":
+		if err := agent.ValidateCopilotReasoningEffort(o.ReasoningEffort); err != nil {
+			return nil, fmt.Errorf("--effort: %w", err)
+		}
 		agentCfg := &agent.AgentConfig{
 			AuthMode:        o.AuthMode,
 			GitHubTokenFile: o.GitHubTokenFile,
 			ModelEndpoint:   o.ModelEndpoint,
 			ModelDeployment: o.ModelDeployment,
+			MaxPromptTokens: maxPromptTokens,
 			Model:           o.Model,
+			ReasoningEffort: o.ReasoningEffort,
 			MaxRounds:       o.MaxRounds,
 			Verbosity:       o.Verbosity,
 		}
@@ -274,10 +293,14 @@ func (o *RawAnalyzeOptions) validate() (*validatedAnalyzeOptions, error) {
 		validated.copilotConfig = agentCfg
 
 	case providerClaude, providerClaudeCode:
+		if err := agent.ValidateClaudeReasoningEffort(o.ReasoningEffort); err != nil {
+			return nil, fmt.Errorf("--effort: %w", err)
+		}
 		claudeCfg := &agent.ClaudeConfig{
-			APIKeyFile: o.AnthropicAPIKeyFile,
-			Model:      o.AnthropicModel,
-			Backend:    o.ClaudeBackend,
+			APIKeyFile:      o.AnthropicAPIKeyFile,
+			Model:           o.AnthropicModel,
+			Backend:         o.ClaudeBackend,
+			ReasoningEffort: o.ReasoningEffort,
 		}
 
 		switch o.ClaudeBackend {
@@ -313,11 +336,12 @@ func (o *RawAnalyzeOptions) validate() (*validatedAnalyzeOptions, error) {
 
 		if o.Provider == providerClaudeCode {
 			validated.claudeCodeConfig = &agent.ClaudeCodeConfig{
-				Model:         o.Model,
-				APIKeyFile:    claudeCfg.APIKeyFile,
-				Backend:       claudeCfg.Backend,
-				VertexProject: claudeCfg.VertexProject,
-				VertexRegion:  claudeCfg.VertexRegion,
+				Model:           o.Model,
+				APIKeyFile:      claudeCfg.APIKeyFile,
+				Backend:         claudeCfg.Backend,
+				VertexProject:   claudeCfg.VertexProject,
+				VertexRegion:    claudeCfg.VertexRegion,
+				ReasoningEffort: claudeCfg.ReasoningEffort,
 			}
 		} else {
 			validated.claudeConfig = claudeCfg
@@ -695,7 +719,6 @@ source code for evidence in its causal chain.`,
   hcpctl snapshot analyze ./snapshot-20250101-120000/periodic-ci-.../12345/TestFoo \
     --aro-hcp ~/code/ARO-HCP \
     --hypershift ~/code/hypershift \
-    --maestro ~/code/maestro \
     --clusters-service ~/code/clusters-service
 
   # Analyze with Anthropic Claude (direct API)
@@ -704,7 +727,6 @@ source code for evidence in its causal chain.`,
     --anthropic-api-key-file ~/.config/anthropic/api_key \
     --aro-hcp ~/code/ARO-HCP \
     --hypershift ~/code/hypershift \
-    --maestro ~/code/maestro \
     --clusters-service ~/code/clusters-service
 
   # Analyze with Claude via Google Vertex AI (keyless ADC auth)
@@ -715,14 +737,12 @@ source code for evidence in its causal chain.`,
     --vertex-region us-east5 \
     --aro-hcp ~/code/ARO-HCP \
     --hypershift ~/code/hypershift \
-    --maestro ~/code/maestro \
     --clusters-service ~/code/clusters-service
 
   # With custom model and output directory
   hcpctl snapshot analyze ./data \
     --aro-hcp ~/code/ARO-HCP \
     --hypershift ~/code/hypershift \
-    --maestro ~/code/maestro \
     --clusters-service ~/code/clusters-service \
     --model gpt-4o \
     --output ./results`,

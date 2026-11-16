@@ -40,9 +40,9 @@ const (
 	// accounts). See https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/tag-resources
 	ExperimentalClusterTagPrefix = "aro-hcp.experimental.cluster."
 
-	// TagClusterSingleReplica is the ARM resource tag that enables
-	// single-replica control plane components when the
-	// ExperimentalReleaseFeatures AFEC is registered on the subscription.
+	// TagClusterSingleReplica retains single-replica control plane components
+	// only on updates to persisted single-replica clusters when the
+	// ExperimentalReleaseFeatures AFEC is registered. New opt-ins are rejected.
 	TagClusterSingleReplica = ExperimentalClusterTagPrefix + "single-replica"
 
 	// TagClusterSizeOverride is the ARM resource tag that enables the
@@ -95,17 +95,30 @@ const (
 	// The value must be a valid Go time.Duration string (e.g. "19m", "30m").
 	TagClusterMaxCreationDuration = ExperimentalClusterTagPrefix + "max-creation-duration"
 
-	// TagClusterMaxUpdateDuration overrides the default 60-minute update deadline.
+	// TagClusterMaxUpdateDuration overrides the default 90-minute update deadline.
 	// Only honored when ExperimentalReleaseFeatures is registered. The value must
 	// be a valid Go duration of at least one minute.
 	TagClusterMaxUpdateDuration = ExperimentalClusterTagPrefix + "max-update-duration"
 
 	// TagClusterMaxDeletionDuration is the ARM resource tag that overrides
-	// the default cluster deletion deadline (60 minutes) when the
+	// the default cluster deletion deadline (50 minutes) when the
 	// ExperimentalReleaseFeatures AFEC is registered on the subscription.
 	// The value must be a valid Go time.Duration string (e.g. "24m", "30m").
 	// The tag is set at cluster creation time but consumed at deletion time.
 	TagClusterMaxDeletionDuration = ExperimentalClusterTagPrefix + "max-deletion-duration"
+
+	// TagClusterBackupScheduleOverride is the ARM resource tag that force-enables
+	// the cluster's Velero backup Schedules when the ExperimentalReleaseFeatures
+	// AFEC is registered on the subscription. The only accepted value is
+	// "Enabled"; absent or empty means "no override".
+	//
+	// An "Enabled" override unpauses the cluster's Velero Schedules despite a
+	// deployment-wide --backup-schedule-state=Disabled. It exists so an individual
+	// test can opt its own cluster into active backups in environments that keep
+	// schedules off to avoid snapshot and datamover costs. It does NOT override the
+	// per-cluster admin API pause (ServiceProviderCluster.Spec.BackupScheduleState),
+	// which stays authoritative.
+	TagClusterBackupScheduleOverride = ExperimentalClusterTagPrefix + "backup-schedule-override"
 
 	// ExperimentalNodePoolTagPrefix is the prefix for all experimental node pool
 	// tags. Tags with this prefix are only honored when the
@@ -119,8 +132,13 @@ const (
 	// The value must be a valid Go time.Duration string (e.g. "19m", "30m").
 	TagNodePoolMaxCreationDuration = ExperimentalNodePoolTagPrefix + "max-creation-duration"
 
-	// TagNodePoolMaxUpdateDuration overrides the default 60-minute update deadline.
+	// TagNodePoolMaxUpdateDuration overrides the default 90-minute update deadline.
 	// Only honored when ExperimentalReleaseFeatures is registered. The value must
 	// be a valid Go duration of at least one minute.
 	TagNodePoolMaxUpdateDuration = ExperimentalNodePoolTagPrefix + "max-update-duration"
+
+	// TagNodePoolMaxDeletionDuration overrides the node pool deletion budget.
+	// Only honored when ExperimentalReleaseFeatures is registered. The value must
+	// be a valid Go duration of at least one minute, set on PUT/PATCH for use by DELETE.
+	TagNodePoolMaxDeletionDuration = ExperimentalNodePoolTagPrefix + "max-deletion-duration"
 )

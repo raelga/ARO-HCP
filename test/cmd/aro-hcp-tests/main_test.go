@@ -119,27 +119,6 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(data)
 }
 
-func specNames(specs et.ExtensionTestSpecs) []string {
-	names := make([]string, len(specs))
-	for i, s := range specs {
-		names[i] = s.Name
-	}
-	return names
-}
-
-func assertSpecOrder(t *testing.T, specs et.ExtensionTestSpecs, want []string) {
-	t.Helper()
-	got := specNames(specs)
-	if len(got) != len(want) {
-		t.Fatalf("expected specs %v, got %v", want, got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("expected specs sorted as %v, got %v", want, got)
-		}
-	}
-}
-
 func TestParseMIContainersLabel(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -163,20 +142,7 @@ func TestParseMIContainersLabel(t *testing.T) {
 	}
 }
 
-func TestMIDemandPriority(t *testing.T) {
-	labeled := &et.ExtensionTestSpec{Name: "labeled", Labels: sets.New("MIContainers:4")}
-	if got := miDemandPriority(labeled); got != 4 {
-		t.Fatalf("miDemandPriority() = %d, want 4", got)
-	}
-	unlabeled := &et.ExtensionTestSpec{Name: "unlabeled", Labels: sets.New[string]()}
-	if got := miDemandPriority(unlabeled); got != 0 {
-		t.Fatalf("miDemandPriority() for a spec missing the label = %d, want 0", got)
-	}
-}
-
-func TestConfigureMISchedulerWiresResourcePoolsAndSortsByDemand(t *testing.T) {
-	t.Setenv("ARO_HCP_DISABLE_MI_SORT", "")
-
+func TestConfigureMISchedulerWiresResourcePools(t *testing.T) {
 	newSpecs := func() et.ExtensionTestSpecs {
 		return et.ExtensionTestSpecs{
 			{Name: "zero-demand", Labels: sets.New("MIContainers:0")},
@@ -184,7 +150,6 @@ func TestConfigureMISchedulerWiresResourcePoolsAndSortsByDemand(t *testing.T) {
 			{Name: "low-demand", Labels: sets.New("MIContainers:1")},
 		}
 	}
-	wantOrder := []string{"high-demand", "low-demand", "zero-demand"}
 
 	t.Run("pooled identities enabled", func(t *testing.T) {
 		specs := newSpecs()
@@ -192,7 +157,6 @@ func TestConfigureMISchedulerWiresResourcePoolsAndSortsByDemand(t *testing.T) {
 			configureMIScheduler(specs, miSchedulerConfig{pooledIdentitiesEnabled: true, containerCount: 5, containerCountSource: "test"})
 		})
 
-		assertSpecOrder(t, specs, wantOrder)
 		for _, spec := range specs {
 			demand, _ := parseMIContainersLabel(spec)
 			if got := spec.Resources.ResourcePools["mi-containers"]; got != demand {
@@ -210,7 +174,6 @@ func TestConfigureMISchedulerWiresResourcePoolsAndSortsByDemand(t *testing.T) {
 			configureMIScheduler(specs, miSchedulerConfig{pooledIdentitiesEnabled: false, containerCount: 5, containerCountSource: "test"})
 		})
 
-		assertSpecOrder(t, specs, wantOrder)
 		for _, spec := range specs {
 			if len(spec.Resources.ResourcePools) != 0 {
 				t.Fatalf("expected no ResourcePools wiring when pooled identities are disabled, got %v on %q", spec.Resources.ResourcePools, spec.Name)
@@ -220,34 +183,6 @@ func TestConfigureMISchedulerWiresResourcePoolsAndSortsByDemand(t *testing.T) {
 			t.Fatalf("expected scheduler banner noting pooled identities are disabled, got: %s", stderr)
 		}
 	})
-}
-
-// TestMISchedulerSortReflectedInExtensionSpecs guards against the bug fixed in
-// ARO-29044: initMIScheduler must be wired to ext.GetSpecs(), not the local specs
-// slice from before ext.AddSpecs(specs). AddSpecs does e.specs = append(e.specs,
-// specs...), which allocates a new backing array -- wiring the pre-AddSpecs slice
-// would make the demand-priority sort reorder a slice run-suite/run-test never reads.
-func TestMISchedulerSortReflectedInExtensionSpecs(t *testing.T) {
-	origSpecs, origSetup := miSchedulerSpecs, miSchedulerSetup
-	defer func() {
-		miSchedulerSpecs, miSchedulerSetup = origSpecs, origSetup
-		miSchedulerConfigure = sync.Once{}
-	}()
-	t.Setenv("ARO_HCP_DISABLE_MI_SORT", "")
-
-	specs := et.ExtensionTestSpecs{
-		{Name: "low-demand", Labels: sets.New("MIContainers:0")},
-		{Name: "high-demand", Labels: sets.New("MIContainers:2")},
-	}
-
-	ext := e.NewExtension("test", "payload", "mi-scheduler-regression")
-	ext.AddSpecs(specs)
-
-	initMIScheduler(ext.GetSpecs(), miSchedulerConfig{pooledIdentitiesEnabled: false, containerCount: 1, containerCountSource: "test"})
-	miSchedulerConfigure = sync.Once{}
-	captureStderr(t, ensureMISchedulerConfigured)
-
-	assertSpecOrder(t, ext.GetSpecs(), []string{"high-demand", "low-demand"})
 }
 
 func TestEnsureMISchedulerConfiguredRunsOnce(t *testing.T) {
@@ -396,9 +331,10 @@ func TestSuiteConcurrencyMetadata(t *testing.T) {
 	fallbacks := map[string]int{
 		"integration/parallel": 24, "integration/parallel/slow": 24, "integration/parallel/all": 24,
 		"stage/parallel": 34, "stage/parallel/slow": 34, "stage/parallel/all": 34,
-		"prod/parallel": 19, "prod/parallel/slow": 19,
+		"prod/parallel": 19, "prod/parallel/slow": 19, "prod/parallel/all": 19,
 		"dev-cd-check/parallel": 20, "rp-api-compat-all/parallel": 24,
 		"rp-api-compat-all/parallel/slow": 24, "hypershift-presubmit/parallel": 24,
+		"expect-failure":   24,
 		"upgrade/in-place": baseline["upgrade/in-place"].Parallelism,
 	}
 	for name, want := range fallbacks {
@@ -432,7 +368,7 @@ func TestSuiteConcurrencyMetadata(t *testing.T) {
 							want = 60
 						}
 						usesAcquired := strings.HasPrefix(name, "integration/") || strings.HasPrefix(name, "stage/") || strings.HasPrefix(name, "prod/") ||
-							strings.HasPrefix(name, "rp-api-compat-all/") || name == "hypershift-presubmit/parallel"
+							strings.HasPrefix(name, "rp-api-compat-all/") || name == "hypershift-presubmit/parallel" || name == "expect-failure"
 						if override == "unset" && lease == acquired && usesAcquired {
 							want = 2
 						}
@@ -862,6 +798,12 @@ func TestCombinedParallelAllSuitesIncludeFastAndSlow(t *testing.T) {
 			slow: "stage/parallel/slow",
 			all:  "stage/parallel/all",
 		},
+		{
+			env:  "Prod",
+			fast: "prod/parallel",
+			slow: "prod/parallel/slow",
+			all:  "prod/parallel/all",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.env, func(t *testing.T) {
@@ -995,4 +937,225 @@ func readMetadataFile(t *testing.T, dir string) map[string]interface{} {
 		t.Fatalf("failed to parse %s: %v", ev2RetryMetadataFile, err)
 	}
 	return got
+}
+
+// extensionSource matches e.NewExtension("aro-hcp", "payload", "cuj-e2e-tests")
+// in setupCli. Registered suite qualifiers are wrapped with a
+// `source == "<extensionSource>"` guard, so synthetic specs must carry it to be
+// considered members.
+const extensionSource = "aro-hcp:payload:cuj-e2e-tests"
+
+// specWithLabels builds a single synthetic spec carrying exactly the given label
+// strings, for exercising suite CEL qualifiers.
+func specWithLabels(name string, labelStrings ...string) *et.ExtensionTestSpec {
+	return &et.ExtensionTestSpec{Name: name, Source: extensionSource, Labels: sets.New(labelStrings...)}
+}
+
+// selectedBy reports whether spec is selected by the suite's OR'd CEL qualifiers,
+// i.e. whether it is a member of that suite.
+func selectedBy(t *testing.T, suite e.Suite, spec *et.ExtensionTestSpec) bool {
+	t.Helper()
+	filtered, err := et.ExtensionTestSpecs{spec}.Filter(suite.Qualifiers)
+	if err != nil {
+		t.Fatalf("filtering spec %q with suite %q qualifiers %v: %v", spec.Name, suite.Name, suite.Qualifiers, err)
+	}
+	return len(filtered) == 1
+}
+
+// TestExpectFailureSuiteSelection verifies the ExpectFailure label routing end to
+// end against the registered suite qualifiers: specs labeled ExpectFailure(JIRA)
+// are collected exclusively by the expect-failure suite and excluded from every
+// other suite, while unlabeled specs keep their normal membership. The exclusion
+// is matched on the ExpectFailure label prefix, so it must hold for any JIRA ID.
+func TestExpectFailureSuiteSelection(t *testing.T) {
+	expectFailureLabel := labels.ExpectFailure("ARO-123")[0] // "ExpectFailure:ARO-123"
+
+	// For each normal suite, base is the minimal label set that makes a spec a
+	// member. Adding an ExpectFailure label must flip membership off while the
+	// plain base spec stays a member (so the exclusion is actually load-bearing).
+	normalSuites := []struct {
+		name string
+		base []string
+	}{
+		{"integration/parallel", []string{labels.RequireNothing[0]}},
+		{"integration/parallel/slow", []string{labels.RequireNothing[0], labels.Slow[0]}},
+		{"integration/parallel/all", []string{labels.RequireNothing[0]}},
+		{"stage/parallel", []string{labels.RequireNothing[0]}},
+		{"stage/parallel/slow", []string{labels.RequireNothing[0], labels.Slow[0]}},
+		{"stage/parallel/all", []string{labels.RequireNothing[0]}},
+		{"prod/parallel", []string{labels.RequireNothing[0]}},
+		{"prod/parallel/slow", []string{labels.RequireNothing[0], labels.Slow[0]}},
+		{"prod/parallel/all", []string{labels.RequireNothing[0]}},
+		{"dev-cd-check/parallel", []string{labels.AroRpApiCompatible[0], labels.Positive[0]}},
+		{"rp-api-compat-all/parallel", []string{labels.AroRpApiCompatible[0]}},
+		{"rp-api-compat-all/parallel/slow", []string{labels.AroRpApiCompatible[0], labels.Slow[0]}},
+		{"hypershift-presubmit/parallel", []string{labels.HypershiftPresubmit[0]}},
+		{"upgrade/in-place", []string{labels.UpgradeInPlace[0]}},
+	}
+
+	t.Run("non-development", func(t *testing.T) {
+		t.Setenv("AROHCP_ENV", "")
+		suites := listSuites(t)
+
+		for _, ns := range normalSuites {
+			t.Run(ns.name, func(t *testing.T) {
+				suite, ok := suites[ns.name]
+				if !ok {
+					t.Fatalf("suite %q is not registered", ns.name)
+				}
+				base := specWithLabels("base", ns.base...)
+				if !selectedBy(t, suite, base) {
+					t.Fatalf("base spec with labels %v should be a member of %q but was excluded", ns.base, ns.name)
+				}
+				xfailLabels := append(append([]string{}, ns.base...), expectFailureLabel)
+				xfail := specWithLabels("xfail", xfailLabels...)
+				if selectedBy(t, suite, xfail) {
+					t.Fatalf("ExpectFailure spec with labels %v must be excluded from %q", xfailLabels, ns.name)
+				}
+			})
+		}
+
+		t.Run("expect-failure", func(t *testing.T) {
+			suite, ok := suites["expect-failure"]
+			if !ok {
+				t.Fatal(`suite "expect-failure" is not registered`)
+			}
+			xfail := specWithLabels("xfail", labels.RequireNothing[0], expectFailureLabel)
+			if !selectedBy(t, suite, xfail) {
+				t.Fatalf(`ExpectFailure spec must be a member of "expect-failure", labels %v`, xfail.Labels.UnsortedList())
+			}
+			normal := specWithLabels("normal", labels.RequireNothing[0])
+			if selectedBy(t, suite, normal) {
+				t.Fatal(`non-ExpectFailure spec must not be a member of "expect-failure"`)
+			}
+			// Invariant: a spec that is both ExpectFailure and UpgradeInPlace is
+			// excluded, because upgrade specs need the UpgradeCoordinator that only
+			// the upgrade/in-place suite starts.
+			upgradeXfail := specWithLabels("upgrade-xfail", labels.UpgradeInPlace[0], expectFailureLabel)
+			if selectedBy(t, suite, upgradeXfail) {
+				t.Fatal(`spec labeled both ExpectFailure and UpgradeInPlace must be excluded from "expect-failure"`)
+			}
+		})
+
+		t.Run("prefix match holds for any JIRA ID", func(t *testing.T) {
+			expectedFailure := suites["expect-failure"]
+			integrationAll := suites["integration/parallel/all"]
+			for _, id := range []string{"ARO-1", "ARO-99999", "OCPBUGS-42"} {
+				spec := specWithLabels("xfail-"+id, labels.RequireNothing[0], labels.ExpectFailure(id)[0])
+				if !selectedBy(t, expectedFailure, spec) {
+					t.Fatalf(`ExpectFailure(%q) spec should be a member of "expect-failure"`, id)
+				}
+				if selectedBy(t, integrationAll, spec) {
+					t.Fatalf(`ExpectFailure(%q) spec must be excluded from "integration/parallel/all"`, id)
+				}
+			}
+		})
+	})
+
+	// Development mode changes the rp-api-compat qualifier to
+	// (AroRpApiCompatible || DevelopmentOnly) && !ExpectFailure. Verify the
+	// ExpectFailure exclusion still covers the DevelopmentOnly side of the OR.
+	t.Run("development rp-api-compat covers both OR sides", func(t *testing.T) {
+		t.Setenv("AROHCP_ENV", "development")
+		suite := listSuites(t)["rp-api-compat-all/parallel"]
+
+		for _, c := range []struct {
+			name string
+			base []string
+		}{
+			{"api-compatible", []string{labels.AroRpApiCompatible[0]}},
+			{"development-only", []string{labels.DevelopmentOnly[0]}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				base := specWithLabels("base", c.base...)
+				if !selectedBy(t, suite, base) {
+					t.Fatalf("in development, base spec with labels %v should be a member of rp-api-compat-all/parallel", c.base)
+				}
+				xfailLabels := append(append([]string{}, c.base...), expectFailureLabel)
+				xfail := specWithLabels("xfail", xfailLabels...)
+				if selectedBy(t, suite, xfail) {
+					t.Fatalf("in development, ExpectFailure spec with labels %v must be excluded from rp-api-compat-all/parallel", xfailLabels)
+				}
+			})
+		}
+	})
+}
+
+// listSpecs returns every registered spec, as the list command renders them.
+func listSpecs(t *testing.T) []et.ExtensionTestSpec {
+	t.Helper()
+
+	output, err := os.CreateTemp(t.TempDir(), "specs-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+
+	root, err := setupCli()
+	if err != nil {
+		t.Fatalf("setting up CLI: %v", err)
+	}
+	root.SetArgs([]string{"list", "tests", "--output", "json"})
+	originalStdout := os.Stdout
+	func() {
+		os.Stdout = output
+		defer func() { os.Stdout = originalStdout }()
+		err = root.Execute()
+	}()
+	if err != nil {
+		t.Fatalf("listing tests: %v", err)
+	}
+	if _, err := output.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	var specs []et.ExtensionTestSpec
+	if err := json.NewDecoder(output).Decode(&specs); err != nil {
+		t.Fatalf("decoding listed tests: %v", err)
+	}
+	return specs
+}
+
+// TestRegisteredSpecsDeclareValidStartPriority keeps a malformed priority label from
+// reaching a suite run, where it would only surface as a startup error in CI.
+func TestRegisteredSpecsDeclareValidStartPriority(t *testing.T) {
+	for _, spec := range listSpecs(t) {
+		if _, err := parseStartPriority(&spec); err != nil {
+			t.Errorf("spec %q: %v", spec.Name, err)
+		}
+	}
+}
+
+// TestStartPriorityDoesNotChangeSuiteMembership pins the rule that priority only
+// reorders the queue: adding it must not move a spec out of, or into, any suite.
+func TestStartPriorityDoesNotChangeSuiteMembership(t *testing.T) {
+	suites := listSuites(t)
+
+	for _, tc := range []struct {
+		suite string
+		base  []string
+	}{
+		{"integration/parallel", []string{labels.RequireNothing[0]}},
+		{"integration/parallel/slow", []string{labels.RequireNothing[0], labels.Slow[0]}},
+		{"stage/parallel", []string{labels.RequireNothing[0]}},
+		{"stage/parallel/all", []string{labels.RequireNothing[0]}},
+		{"prod/parallel", []string{labels.RequireNothing[0]}},
+		{"rp-api-compat-all/parallel", []string{labels.AroRpApiCompatible[0]}},
+		{"upgrade/in-place", []string{labels.UpgradeInPlace[0]}},
+	} {
+		t.Run(tc.suite, func(t *testing.T) {
+			suite, ok := suites[tc.suite]
+			if !ok {
+				t.Fatalf("suite %q is not registered", tc.suite)
+			}
+			base := specWithLabels("base", tc.base...)
+			prioritized := specWithLabels("prioritized", append(append([]string{}, tc.base...), labels.StartPriority(50)[0])...)
+
+			if !selectedBy(t, suite, base) {
+				t.Fatalf("base spec with labels %v should be a member of %q", tc.base, tc.suite)
+			}
+			if !selectedBy(t, suite, prioritized) {
+				t.Fatalf("spec with labels %v and a start priority should stay a member of %q", tc.base, tc.suite)
+			}
+		})
+	}
 }

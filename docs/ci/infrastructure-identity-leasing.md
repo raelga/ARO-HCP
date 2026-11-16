@@ -2,9 +2,30 @@
 
 Infrastructure identity leasing lets CI deployments reuse persistent Azure
 managed identities instead of creating new identities for every run. The
-implemented deployment support is opt-in. Slot-manager can acquire, admit,
-provision, and publish a leased bundle when a catalog declares the asset.
-Live catalog demand, pool creation, and CI activation are separate work.
+deployment support is opt-in. The v2 catalog activates one managed DEV
+infrastructure-identity pool for all DEV pools; INT, STG, and PROD remain
+unchanged. The activation PR stays unmerged until the pool is provisioned and
+the matching Boskos resources are deployed. Only jobs using the activation PR
+exercise the new catalog demand before it merges.
+
+Provision the pool from the ARO-HCP catalog with:
+
+```bash
+make -C test apply-pool-assets ENVIRONMENT=dev ASSET=infrastructure_identities
+```
+
+Validate the complete declared pool before making it leaseable:
+
+```bash
+make -C test validate-pool-assets ENVIRONMENT=dev ASSET=infrastructure_identities
+```
+
+The pool capacity is derived from catalog demand: 21 bundles across the five
+DEV pools (five slots each for shard0–shard3, one Hypershift slot). Each bundle
+contains the service and two management-stamp identity groups. Deploy matching
+Boskos resources before merging the activation PR. For each operator action,
+use the ARO-HCP revision containing the catalog being applied; the Make targets
+build `aro-hcp-tests` and embed current Bicep artifacts.
 
 ## Deployment behavior
 
@@ -47,8 +68,7 @@ not create or validate the contents of a persistent identity pool.
 `test/aro-hcp-tests infra build-config-override` generates CI configuration
 overrides offline, without Azure credentials or E2E suite initialization. The
 sourced `hack/ci/build-config-override.sh` adapter uses the existing binary at
-`test/aro-hcp-tests` in the source checkout; `ARO_HCP_TESTS_BINARY` can select an
-explicit binary for local use.
+`test/aro-hcp-tests` in the source checkout.
 
 The root CLI still validates `ARO_HCP_SUITE_PARALLELISM` during construction;
 when supplied, it must be empty or a positive integer, even for offline commands.

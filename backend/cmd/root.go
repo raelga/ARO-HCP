@@ -30,11 +30,15 @@ import (
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/klog/v2"
 
+	azcorearm "github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+
 	"github.com/Azure/ARO-HCP/backend/pkg/app"
 	azureclient "github.com/Azure/ARO-HCP/backend/pkg/azure/client"
 	"github.com/Azure/ARO-HCP/backend/pkg/controllers/cluster/backups"
+	"github.com/Azure/ARO-HCP/backend/pkg/controllers/controllerconfig"
 	"github.com/Azure/ARO-HCP/internal/api/coreapi"
 	internalazure "github.com/Azure/ARO-HCP/internal/azure"
+	"github.com/Azure/ARO-HCP/internal/cincinnati"
 	"github.com/Azure/ARO-HCP/internal/database/cosmosstorage/cosmosclient"
 	"github.com/Azure/ARO-HCP/internal/signal"
 	"github.com/Azure/ARO-HCP/internal/tracing"
@@ -46,8 +50,7 @@ type BackendRootCmdFlags struct {
 	Kubeconfig                                                                                    string
 	K8sNamespace                                                                                  string
 	AzureLocation                                                                                 string
-	AzureCosmosDBName                                                                             string
-	AzureCosmosDBURL                                                                              string
+	CosmosAccountResourceID                                                                       string
 	ClustersServiceURL                                                                            string
 	ClustersServiceTLSInsecure                                                                    bool
 	MetricsServerListenAddress                                                                    string
@@ -71,14 +74,16 @@ type BackendRootCmdFlags struct {
 	AzureClusterScopedIdentitiesRoleSetName                                                       string
 	BackupScheduleCadence                                                                         string
 	BackupScheduleState                                                                           string
+	OrphanedMRGCleanupTargetSubscriptionAFECFlags                                                 string
+	OrphanedMRGCleanupExcludedSubscriptionAFECFlags                                               []string
+	OrphanedMRGCleanupRunningMode                                                                 string
 }
 
 func (f *BackendRootCmdFlags) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.Kubeconfig, "kubeconfig", f.Kubeconfig, "Absolute path to the kubeconfig file")
 	cmd.Flags().StringVar(&f.K8sNamespace, "namespace", f.K8sNamespace, "Kubernetes namespace")
 	cmd.Flags().StringVar(&f.AzureLocation, "location", f.AzureLocation, "Azure location")
-	cmd.Flags().StringVar(&f.AzureCosmosDBName, "cosmos-name", f.AzureCosmosDBName, "Cosmos database name")
-	cmd.Flags().StringVar(&f.AzureCosmosDBURL, "cosmos-url", f.AzureCosmosDBURL, "Cosmos database URL")
+	cmd.Flags().StringVar(&f.CosmosAccountResourceID, "cosmos-account-resource-id", f.CosmosAccountResourceID, "Cosmos database account ARM resource ID")
 	cmd.Flags().StringVar(&f.ClustersServiceURL, "clusters-service-url", f.ClustersServiceURL, "URL of the OCM API gateway")
 	cmd.Flags().BoolVar(&f.ClustersServiceTLSInsecure, "insecure", f.ClustersServiceTLSInsecure, "Skip validating TLS for clusters-service")
 	cmd.Flags().StringVar(&f.MetricsServerListenAddress, "metrics-listen-address", f.MetricsServerListenAddress, "Address on which to expose metrics")
@@ -103,10 +108,9 @@ func (f *BackendRootCmdFlags) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().IntVar(&f.LogVerbosity, "log-verbosity", f.LogVerbosity, "Log verbosity. 0 is the default verbosity level, equivalent to INFO. It must be a value >= 0, where a higher value means more verbose output.")
 
 	cmd.Flags().StringVar(&f.MaestroSourceEnvironmentIdentifier, "maestro-source-environment-identifier", f.MaestroSourceEnvironmentIdentifier,
-		"The environment name part used when generating Maestro Source IDs using the backend/pkg/maestro.GenerateMaestroSourceID function. "+
-			"It must be between 1 and 10 characters and can contain only lowercase letters. Example value: arohcpdev."+
-			"Changing the value causes the Maestro Source IDs generated to change which impacts visibility of previously existing resources. It is "+
-			"therefore a must to first understand and plan the impact changing the value would have, including any potential migration plan before changing it.",
+		"The environment identifier used in hosted cluster namespace names. "+
+			"It must be between 1 and 10 characters. Example value: arohcpdev. "+
+			"Keep this value stable for existing clusters; changing it changes namespace names and requires a migration plan.",
 	)
 
 	cmd.Flags().BoolVar(
@@ -236,7 +240,14 @@ func (f *BackendRootCmdFlags) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.BackupScheduleState, "backup-schedule-state", f.BackupScheduleState,
 		fmt.Sprintf("Backup schedule state. Accepted values: %s, %s", coreapi.BackupScheduleStateEnabled, coreapi.BackupScheduleStateDisabled))
 
-	cmd.MarkFlagsRequiredTogether("cosmos-name", "cosmos-url")
+	cmd.Flags().StringVar(&f.OrphanedMRGCleanupTargetSubscriptionAFECFlags, "orphaned-mrg-cleanup-target-subscription-afec-flags", f.OrphanedMRGCleanupTargetSubscriptionAFECFlags,
+		"AFEC flag identifying subscriptions owned by this environment for orphaned MRG cleanup (e.g. Microsoft.RedHatOpenShift/STAGING-APPROVED)")
+	cmd.Flags().StringSliceVar(&f.OrphanedMRGCleanupExcludedSubscriptionAFECFlags, "orphaned-mrg-cleanup-excluded-subscription-afec-flags", f.OrphanedMRGCleanupExcludedSubscriptionAFECFlags,
+		"AFEC flags identifying subscriptions owned by OTHER environments for orphaned MRG cleanup (comma-separated or repeated)")
+	cmd.Flags().StringVar(&f.OrphanedMRGCleanupRunningMode, "orphaned-mrg-cleanup-running-mode", f.OrphanedMRGCleanupRunningMode,
+		"Running mode for orphaned MRG cleanup: 'delete' to actually delete, 'dry-run' for read-only mode.")
+	cmd.MarkFlagsMutuallyExclusive("orphaned-mrg-cleanup-target-subscription-afec-flags", "orphaned-mrg-cleanup-excluded-subscription-afec-flags")
+
 }
 
 func (f *BackendRootCmdFlags) validate() error {
@@ -248,12 +259,8 @@ func (f *BackendRootCmdFlags) validate() error {
 		return utils.TrackError(fmt.Errorf("--clusters-service-url is required"))
 	}
 
-	if len(f.AzureCosmosDBName) == 0 {
-		return utils.TrackError(fmt.Errorf("--cosmos-name is required"))
-	}
-
-	if len(f.AzureCosmosDBURL) == 0 {
-		return utils.TrackError(fmt.Errorf("--cosmos-url is required"))
+	if _, err := ParseCosmosAccountResourceID(f.CosmosAccountResourceID); err != nil {
+		return utils.TrackError(fmt.Errorf("--cosmos-account-resource-id: %w", err))
 	}
 
 	if len(f.K8sNamespace) == 0 {
@@ -343,6 +350,14 @@ func (f *BackendRootCmdFlags) validate() error {
 
 	if f.BackupScheduleState != string(coreapi.BackupScheduleStateEnabled) && f.BackupScheduleState != string(coreapi.BackupScheduleStateDisabled) {
 		return utils.TrackError(fmt.Errorf("--backup-schedule-state must be '%s' or '%s'", coreapi.BackupScheduleStateEnabled, coreapi.BackupScheduleStateDisabled))
+	}
+
+	if len(f.OrphanedMRGCleanupTargetSubscriptionAFECFlags) != 0 && len(f.OrphanedMRGCleanupExcludedSubscriptionAFECFlags) != 0 {
+		return utils.TrackError(fmt.Errorf("--orphaned-mrg-cleanup-target-subscription-afec-flags and --orphaned-mrg-cleanup-excluded-subscription-afec-flags are mutually exclusive"))
+	}
+
+	if f.OrphanedMRGCleanupRunningMode != "delete" && f.OrphanedMRGCleanupRunningMode != "dry-run" {
+		return utils.TrackError(fmt.Errorf("--orphaned-mrg-cleanup-running-mode must be 'delete' or 'dry-run', got %q", f.OrphanedMRGCleanupRunningMode))
 	}
 
 	return nil
@@ -436,7 +451,11 @@ func (f *BackendRootCmdFlags) ToBackendOptions(ctx context.Context, cmd *cobra.C
 		return nil, utils.TrackError(fmt.Errorf("failed to create FPA client builder: %w", err))
 	}
 
-	backendIdentityAzureClients, err := app.NewBackendIdentityAzureClients(ctx, azureConfig)
+	defaultAzureCredential, err := newBackendDefaultAzureCredential(azureConfig)
+	if err != nil {
+		return nil, utils.TrackError(fmt.Errorf("failed to create backend identity azure clients: %w", err))
+	}
+	backendIdentityAzureClients, err := app.NewBackendIdentityAzureClients(ctx, azureConfig, defaultAzureCredential)
 	if err != nil {
 		return nil, utils.TrackError(fmt.Errorf("failed to create backend identity azure clients: %w", err))
 	}
@@ -514,8 +533,32 @@ func (f *BackendRootCmdFlags) ToBackendOptions(ctx context.Context, cmd *cobra.C
 		azCoreClientOptions,
 	)
 
-	storageFactory, err := app.NewStorageFactory(f.AzureCosmosDBURL, f.AzureCosmosDBName, cosmosclient.Options{ClientOptions: azCoreClientOptions},
-		app.BackendStorageFactoryOptions(!f.InsecureIgnoreUserAzureManagedIdentitiesThatNeedManagedIdentitiesDataplaneAvailableAndUseMock))
+	orphanedMRGCleanupConfig := &controllerconfig.OrphanedMRGCleanupConfig{
+		TargetSubscriptionAFECFlags:   f.OrphanedMRGCleanupTargetSubscriptionAFECFlags,
+		ExcludedSubscriptionAFECFlags: f.OrphanedMRGCleanupExcludedSubscriptionAFECFlags,
+		RunningMode:                   f.OrphanedMRGCleanupRunningMode,
+	}
+	storageControllerContext := app.ControllerContext{
+		HasRealFPA:               !f.InsecureIgnoreUserAzureManagedIdentitiesThatNeedManagedIdentitiesDataplaneAvailableAndUseMock,
+		OrphanedMRGCleanupConfig: orphanedMRGCleanupConfig,
+	}
+	cosmosAccountResourceID, err := azcorearm.ParseResourceID(f.CosmosAccountResourceID)
+	if err != nil {
+		return nil, utils.TrackError(err)
+	}
+	cosmosAccountDiscoverer, err := NewCosmosAccountDiscoverer(cosmosAccountResourceID, defaultAzureCredential, azureConfig.CloudEnvironment.ARMClientOptions())
+	if err != nil {
+		return nil, utils.TrackError(err)
+	}
+	discoveredAccount, err := cosmosAccountDiscoverer.Discover(ctx)
+	if err != nil {
+		return nil, utils.TrackError(err)
+	}
+	storageOptions, err := discoverStorageFactoryOptions(ctx, discoveredAccount, storageControllerContext)
+	if err != nil {
+		return nil, utils.TrackError(err)
+	}
+	storageFactory, err := app.NewStorageFactory(discoveredAccount.Endpoint, discoveredAccount.DatabaseName, cosmosclient.Options{ClientOptions: azCoreClientOptions}, storageOptions)
 	if err != nil {
 		return nil, utils.TrackError(fmt.Errorf("failed to create backend storage factory: %w", err))
 	}
@@ -544,6 +587,7 @@ func (f *BackendRootCmdFlags) ToBackendOptions(ctx context.Context, cmd *cobra.C
 		LeaderElectionLock:                 leaderElectionLock,
 		StorageFactory:                     storageFactory,
 		ClustersServiceClient:              clustersServiceClient,
+		VersionProfileSource:               cincinnati.NewGraphDataClient(),
 		MetricsServerListenAddress:         f.MetricsServerListenAddress,
 		HealthzServerListenAddress:         f.HealthzServerListenAddress,
 		TracerProviderShutdownFunc:         otelShutdown,
@@ -563,6 +607,8 @@ func (f *BackendRootCmdFlags) ToBackendOptions(ctx context.Context, cmd *cobra.C
 		CloudEnvironment:              azureConfig.CloudEnvironment,
 		MetricsRegisterer:             legacyregistry.Registerer(),
 		MetricsGatherer:               legacyregistry.DefaultGatherer,
+		OrphanedMRGCleanupConfig:      orphanedMRGCleanupConfig,
+		ClusterOIDCIssuerBaseURL:      azureConfig.AzureRuntimeConfig.DataPlaneIdentitiesOIDCConfiguration.OIDCIssuerBaseURL,
 	}
 
 	return backendOptions, nil
@@ -573,8 +619,7 @@ func NewBackendRootCmdFlags() *BackendRootCmdFlags {
 		Kubeconfig:                 "",
 		K8sNamespace:               os.Getenv("NAMESPACE"),
 		AzureLocation:              os.Getenv("LOCATION"),
-		AzureCosmosDBName:          os.Getenv("DB_NAME"),
-		AzureCosmosDBURL:           os.Getenv("DB_URL"),
+		CosmosAccountResourceID:    os.Getenv("COSMOS_ACCOUNT_RESOURCE_ID"),
 		ClustersServiceTLSInsecure: false,
 		MetricsServerListenAddress: ":8081",
 		HealthzServerListenAddress: ":8083",
@@ -586,6 +631,7 @@ func NewBackendRootCmdFlags() *BackendRootCmdFlags {
 		ExitOnPanic:                                     true,
 		BackupScheduleCadence:                           string(backups.BackupCadenceProduction),
 		BackupScheduleState:                             string(coreapi.BackupScheduleStateEnabled),
+		OrphanedMRGCleanupRunningMode:                   "dry-run",
 	}
 
 	return flags
@@ -606,7 +652,7 @@ func NewCmdRoot() *cobra.Command {
 	communicates with Clusters Service and CosmosDB.
 
 	# Run ARO HCP Backend locally to connect to a local Clusters Service at http://localhost:8000
-	%s --cosmos-name ${DB_NAME} --cosmos-url ${DB_URL} --location ${LOCATION} \
+	%s --cosmos-account-resource-id ${COSMOS_ACCOUNT_RESOURCE_ID} --location ${LOCATION} \
 		--clusters-service-url "http://localhost:8000"
 `, processName),
 		RunE: func(cmd *cobra.Command, args []string) error {

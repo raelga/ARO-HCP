@@ -26,19 +26,28 @@ endif
 
 .DEFAULT_GOAL := tenant-quota-collector
 
-tenant-quota-collector:
+tenant-quota-collector: force-go-build
 	go build -ldflags="-X github.com/Azure/ARO-HCP/internal/version.CommitSHA=${TENANT_QUOTA_IMAGE_TAG}" -o tenant-quota-collector .
 
 # ---------------------------------------------------------------------------
 # Local config rendering
 # ---------------------------------------------------------------------------
-_output/config.yaml: $(TEMPLATIZE) deploy/config.yaml.tmpl $(DEV_CI_CONFIG_FILE)
+# The chart owns the config shape (subscriptions are derived from the ci.<env>
+# CSVs in config-dev-ci.yaml), so render the deployed values and let Helm
+# produce the ConfigMap, then extract the collector config from it.
+_output/values.yaml: $(TEMPLATIZE) deploy/values.yaml.tmpl $(DEV_CI_CONFIG_FILE)
 	$(TEMPLATIZE) generate \
 		--config-file $(DEV_CI_CONFIG_FILE) \
 		--dev-settings-file $(DEV_SETTINGS_FILE) \
 		--dev-environment $(DEPLOY_ENV) \
-		--input deploy/config.yaml.tmpl \
+		--input deploy/values.yaml.tmpl \
 		--output $@
+
+_output/config.yaml: $(HELM) $(YQ) _output/values.yaml deploy/templates/configmap.yaml deploy/templates/_helpers.tpl
+	set -o pipefail; \
+	$(HELM) template tenant-quota deploy --kube-version 1.30.0 -f _output/values.yaml --show-only templates/configmap.yaml \
+		| $(YQ) '.data."config.yaml"' > $@.tmp
+	mv $@.tmp $@
 
 render-config: _output/config.yaml
 .PHONY: render-config
@@ -104,3 +113,7 @@ show-image:
 	@echo "Repository: ${TENANT_QUOTA_IMAGE_REPOSITORY}"
 	@echo "Tag: ${TENANT_QUOTA_IMAGE_TAG}"
 .PHONY: show-image
+
+# Always consult Go's build cache, including for dependency-only changes.
+.PHONY: force-go-build
+force-go-build:

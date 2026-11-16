@@ -19,7 +19,7 @@ prow:
   repository:
     org: ""
     name: ""
-  excludeJobs: []
+  excludeJobs: ""
 ciJobOutcomes:
   enabled: false
   gcsBucket: "test-platform-results-public"
@@ -34,4 +34,13 @@ ciJobOutcomes:
   discoveryWorkers: 2
   cacheSize: 20000
   cacheTTL: "15m"
-tenants: []
+ciFailurePatterns:
+  results:
+    table: "ciFailurePatterns"
+    ingestionMapping: "ciFailurePatternsMapping"
+  interval: "5m"
+  workers: 4
+  cacheSize: 20000
+  cacheTTL: "15m"
+tenants: {}
+ci: {}

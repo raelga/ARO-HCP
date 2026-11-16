@@ -52,6 +52,14 @@ const (
 	IdentityContainerAssignmentRetryInterval = 60 * time.Second
 )
 
+// Operator verifier timeouts
+const (
+	IngressDNSVerifyTimeout         = 10 * time.Minute
+	CloudNetworkConfigVerifyTimeout = 10 * time.Minute
+	CSIVolumeVerifyTimeout          = 10 * time.Minute
+	CCMLoadBalancerVerifyTimeout    = 10 * time.Minute
+)
+
 // Backup timeouts
 const (
 	BackupWaitTimeout  = 11 * time.Minute

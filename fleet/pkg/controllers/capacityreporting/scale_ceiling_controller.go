@@ -26,7 +26,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azcorearm "github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v8"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v9"
 
 	"github.com/Azure/ARO-HCP/fleet/pkg/azure/agentpools"
 	"github.com/Azure/ARO-HCP/fleet/pkg/azure/skucache"
@@ -54,6 +54,7 @@ type scaleCeilingReportingSyncer struct {
 
 func NewManagementClusterScaleCeilingReportingController(
 	managementClusterInformer cache.SharedIndexInformer,
+	stampInformer cache.SharedIndexInformer,
 	fleetDBClient fleetcosmosstorage.FleetDBClient,
 	readDesireLister kubeapplierlisters.ReadDesireLister,
 	region string,
@@ -79,11 +80,14 @@ func NewManagementClusterScaleCeilingReportingController(
 
 	controller := fleetcontrollers.NewStampWatchingController(
 		ManagementClusterScaleCeilingReportingControllerName,
+		stampInformer,
+		scaleCeilingResyncPeriod,
 		syncer,
 		cfg,
 	)
 
-	if err := controller.QueueForInformers(scaleCeilingResyncPeriod, managementClusterInformer); err != nil {
+	// Stamp keys already resync once; other inputs only enqueue on changes.
+	if err := controller.QueueForInformers(0, managementClusterInformer); err != nil {
 		panic(err) // coding error
 	}
 

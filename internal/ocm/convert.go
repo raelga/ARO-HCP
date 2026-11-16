@@ -674,8 +674,11 @@ func withImmutableAttributes(clusterBuilder *arohcpv1alpha1.ClusterBuilder, clus
 	}
 
 	// Cluster Service rejects an empty DomainPrefix string.
-	if cluster.CustomerProperties.DNS.BaseDomainPrefix != "" {
+	if len(cluster.CustomerProperties.DNS.BaseDomainPrefix) != 0 {
 		clusterBuilder.DomainPrefix(cluster.CustomerProperties.DNS.BaseDomainPrefix)
+	}
+	if len(cluster.ServiceProviderProperties.DNS.BaseDomain) != 0 {
+		clusterBuilder.DNS(arohcpv1alpha1.NewDNS().BaseDomain(cluster.ServiceProviderProperties.DNS.BaseDomain))
 	}
 
 	return clusterBuilder, azureBuilder, nil
@@ -867,19 +870,6 @@ func ConvertCSManagementClusterToInternal(csShard *arohcpv1alpha1.ProvisionShard
 		return nil, fmt.Errorf("failed to parse public DNS zone resource ID %q: %w", azureShard.PublicDnsZoneResourceId(), err)
 	}
 
-	maestroConfig := csShard.MaestroConfig()
-	if maestroConfig == nil {
-		return nil, fmt.Errorf("management cluster %q has no maestro config", shardID)
-	}
-	restConfig := maestroConfig.RestApiConfig()
-	if restConfig == nil {
-		return nil, fmt.Errorf("management cluster %q has no maestro REST API config", shardID)
-	}
-	grpcConfig := maestroConfig.GrpcApiConfig()
-	if grpcConfig == nil {
-		return nil, fmt.Errorf("management cluster %q has no maestro GRPC API config", shardID)
-	}
-
 	hostedClustersSecretsKeyVaultURL := azureShard.CxSecretsKeyVaultUrl()
 	hostedClustersManagedIdentitiesKeyVaultURL := azureShard.CxManagedIdentitiesKeyVaultUrl()
 	hostedClustersSecretsKeyVaultManagedIdentityClientID := azureShard.CxSecretsKeyVaultManagedIdentityClientId()
@@ -938,9 +928,6 @@ func ConvertCSManagementClusterToInternal(csShard *arohcpv1alpha1.ProvisionShard
 			HostedClustersSecretsKeyVaultURL:                     hostedClustersSecretsKeyVaultURL,
 			HostedClustersManagedIdentitiesKeyVaultURL:           hostedClustersManagedIdentitiesKeyVaultURL,
 			HostedClustersSecretsKeyVaultManagedIdentityClientID: hostedClustersSecretsKeyVaultManagedIdentityClientID,
-			MaestroConsumerName:                                  maestroConfig.ConsumerName(),
-			MaestroRESTAPIURL:                                    restConfig.Url(),
-			MaestroGRPCTarget:                                    grpcConfig.Url(),
 			ClusterServiceProvisionShardID:                       &shardID,
 			// i hate this a lot but there is no representation of the cosmosdb container as of now
 			// in CS or the RP so we replicate the naming convention here.

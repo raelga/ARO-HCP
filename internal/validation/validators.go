@@ -15,14 +15,17 @@
 package validation
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/url"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/blang/semver/v4"
 	"github.com/google/uuid"
@@ -897,21 +900,6 @@ func newOr[T any](validateFns ...validate.ValidateFunc[T]) validate.ValidateFunc
 	}
 }
 
-// TODO this is compatible with what existed before, but still allows much invalid content
-func ValidatePEM(ctx context.Context, op operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
-	if value == nil {
-		return nil
-	}
-	if len(*value) == 0 {
-		return nil
-	}
-	if !x509.NewCertPool().AppendCertsFromPEM([]byte(*value)) {
-		return field.ErrorList{field.Invalid(fldPath, *value, "not a valid PEM")}
-	}
-
-	return nil
-}
-
 // EachMapKey validates each element of newMap with the specified validation function.
 // This is a copy from validate.EachMapKey except that the field path includes the key because its more useful for us that way.
 func EachMapKey[K ~string, T any](ctx context.Context, op operation.Operation, fldPath *field.Path, newMap, oldMap map[K]T, validator validate.ValidateFunc[*K]) field.ErrorList {
@@ -1036,9 +1024,9 @@ func ValidateMajorUpgrade(fromVersion, toVersion semver.Version) error {
 // are operationally identical to upgrades. Constraints:
 //   - Upgrade: at most +2 minor versions from current, and cannot exceed lowest control plane version
 //   - Downgrade: at most -2 minor versions from the highest control plane version
-//   - Cross-major changes (either direction) require AFEC FeatureExperimentalReleaseFeatures
+//   - Cross-major upgrades must follow the supported upgrade paths
 //   - NP version must be in the allowed skew map when CP and NP are on different majors
-func ValidateNodePoolVersionChange(desiredVersion semver.Version, activeVersions []coreapi.ServiceProviderNodePoolActiveVersion, lowestCPVersion, highestCPVersion *semver.Version, allowMajorUpgrade bool) error {
+func ValidateNodePoolVersionChange(desiredVersion semver.Version, activeVersions []coreapi.ServiceProviderNodePoolActiveVersion, lowestCPVersion, highestCPVersion *semver.Version) error {
 	// Skip if already in active versions
 	if slices.ContainsFunc(activeVersions, func(av coreapi.ServiceProviderNodePoolActiveVersion) bool {
 		return av.Version != nil && av.Version.EQ(desiredVersion)
@@ -1078,22 +1066,16 @@ func ValidateNodePoolVersionChange(desiredVersion semver.Version, activeVersions
 	// validate that the desired NP version can coexist with the CP version.
 	// This applies to both upgrades (4.21→4.22) and downgrades (4.22→4.21) within
 	// the same major. NP changes that cross majors (e.g., 5.0→4.22) skip this and
-	// go through the AFEC gate below.
+	// use the cross-major path or skew check below.
 	isSameMajorNPChange := highest == nil || desiredVersion.Major == highest.Major
 	if desiredVersion.Major != highestCPVersion.Major && isSameMajorNPChange {
-		if !allowMajorUpgrade {
-			return fmt.Errorf("node pool version changes are not supported while the control plane is on a different major version (node pool major version %d vs control plane major version %d)", desiredVersion.Major, highestCPVersion.Major)
-		}
 		return ValidateCrossMajorNodePoolSkew(desiredVersion, *highestCPVersion)
 	}
 
-	// Cross-major change (upgrade or downgrade): gated behind FeatureExperimentalReleaseFeatures.
+	// Cross-major changes must follow the supported upgrade path or skew rules.
 	isCrossMajorUpgrade := lowest != nil && desiredVersion.Major > lowest.Major
 	isCrossMajorDowngrade := highest != nil && desiredVersion.Major < highest.Major
 	if isCrossMajorUpgrade || isCrossMajorDowngrade {
-		if !allowMajorUpgrade {
-			return fmt.Errorf("major version changes are not supported")
-		}
 		if isCrossMajorUpgrade {
 			return ValidateMajorUpgrade(*lowest, desiredVersion)
 		}
@@ -1109,4 +1091,127 @@ func ValidateNodePoolVersionChange(desiredVersion semver.Version, activeVersions
 	}
 
 	return nil
+}
+
+// pemBlockDiagnostic is the field.Error BadValue for a PEM block. It always
+// includes the 1-based block index and, when known, the certificate subject.
+func pemBlockDiagnostic(blockIndex int, subject string) string {
+	if subject == "" {
+		return fmt.Sprintf("block %d", blockIndex)
+	}
+	return fmt.Sprintf("block %d: %s", blockIndex, subject)
+}
+
+// pemBlockDetail prefixes a CA PEM error with the block index and, when known,
+// the certificate subject so every message has the same identity.
+func pemBlockDetail(blockIndex int, subject, detail string) string {
+	if subject == "" {
+		return fmt.Sprintf("certificate %d %s", blockIndex, detail)
+	}
+	return fmt.Sprintf("certificate %d (%s) %s", blockIndex, subject, detail)
+}
+
+// validateCACertificatePEM checks that a PEM-encoded certificate is a valid CA certificate.
+//   - only CERTIFICATE blocks are allowed (private keys and other types are rejected)
+//   - each certificate must parse as X.509, have the CA basic constraint, and
+//     satisfy certificate is not expired
+//   - trailing non-PEM data after the last block is rejected
+//   - If the leaf certificate in bundle is not a CA certificate, it is accepted as public certificate chain
+func validateCACertificatePEM(ctx context.Context, op operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	if value == nil || len(*value) == 0 {
+		return nil
+	}
+
+	rest := []byte(*value)
+	errs := field.ErrorList{}
+	foundBlock := false
+	blockIndex := 0
+	now := time.Now()
+	firstIsLeaf := false
+	foundCAAfterLeaf := false
+
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		foundBlock = true
+		blockIndex++
+		diagnostic := pemBlockDiagnostic(blockIndex, "")
+
+		if block.Type != "CERTIFICATE" {
+			errs = append(errs, field.Invalid(
+				fldPath,
+				diagnostic,
+				fmt.Sprintf("PEM block %d has type %q; must be CERTIFICATE", blockIndex, block.Type),
+			))
+			continue
+		}
+
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			errs = append(errs, field.Invalid(
+				fldPath,
+				diagnostic,
+				pemBlockDetail(blockIndex, "", fmt.Sprintf("is not a valid X.509 certificate: %s", err)),
+			))
+			continue
+		}
+
+		subject := cert.Subject.String()
+		diagnostic = pemBlockDiagnostic(blockIndex, subject)
+
+		if blockIndex == 1 && !cert.IsCA {
+			// First cert is a leaf — this is the start of a public certificate chain.
+			// We require at least one CA cert to follow.
+			firstIsLeaf = true
+		} else if !cert.IsCA {
+			errs = append(errs, field.Invalid(
+				fldPath,
+				diagnostic,
+				pemBlockDetail(blockIndex, subject, "must be a CA certificate"),
+			))
+		} else if firstIsLeaf {
+			// This is a CA cert following the leaf — the chain requirement is satisfied.
+			foundCAAfterLeaf = true
+		}
+
+		if now.Before(cert.NotBefore) {
+			notBefore := cert.NotBefore.UTC().Format(time.RFC3339)
+			errs = append(errs, field.Invalid(
+				fldPath,
+				diagnostic,
+				pemBlockDetail(blockIndex, subject, fmt.Sprintf("is not yet valid (NotBefore %s)", notBefore)),
+			))
+		}
+
+		if now.After(cert.NotAfter) {
+			notAfter := cert.NotAfter.UTC().Format(time.RFC3339)
+			errs = append(errs, field.Invalid(
+				fldPath,
+				diagnostic,
+				pemBlockDetail(blockIndex, subject, fmt.Sprintf("has expired (NotAfter %s)", notAfter)),
+			))
+		}
+	}
+
+	if !foundBlock {
+		return field.ErrorList{field.Invalid(fldPath, "", "not a valid PEM")}
+	}
+
+	// If the first cert was a leaf, at least one CA must follow it.
+	if firstIsLeaf && !foundCAAfterLeaf {
+		errs = append(errs, field.Invalid(
+			fldPath,
+			"",
+			"public certificate chain must include at least one CA certificate after the leaf certificate",
+		))
+	}
+
+	if len(bytes.TrimSpace(rest)) > 0 {
+		errs = append(errs, field.Invalid(fldPath, "", "contains trailing non-PEM data"))
+	}
+
+	return errs
 }

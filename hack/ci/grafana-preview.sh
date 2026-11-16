@@ -15,6 +15,18 @@
 
 set -euo pipefail
 
+GITHUB_REPO_OWNER="${GITHUB_REPO_OWNER:-Azure}"
+GITHUB_REPO_NAME="${GITHUB_REPO_NAME:-ARO-HCP}"
+
+# Exit early when another repository's pull request started this job. Without
+# this guard, PULL_BASE_SHA points at a commit that is absent from the ARO-HCP
+# history, and the preview comment goes to the wrong pull request.
+if [[ -n "${REPO_OWNER:-}${REPO_NAME:-}" \
+    && "${REPO_OWNER:-}/${REPO_NAME:-}" != "${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}" ]]; then
+    echo "This job runs for ${REPO_OWNER:-}/${REPO_NAME:-}, not ${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}. Skipping the dashboard preview."
+    exit 0
+fi
+
 for tool in az curl jq git grep sed tr head tail mktemp sha1sum; do
     if ! command -v "${tool}" &>/dev/null; then
         echo "ERROR: ${tool} is required but not found" >&2
@@ -38,8 +50,6 @@ GITHUB_API="https://api.github.com"
 : "${GRAFANA_RESOURCE_GROUP:?GRAFANA_RESOURCE_GROUP must be set}"
 
 PULL_PULL_SHA="${PULL_PULL_SHA:-$(git rev-parse HEAD)}"
-REPO_OWNER="${REPO_OWNER:-Azure}"
-REPO_NAME="${REPO_NAME:-ARO-HCP}"
 
 detect_changed_dashboards() {
     if ! git cat-file -e "${PULL_BASE_SHA}^{commit}" 2>/dev/null; then
@@ -121,8 +131,13 @@ upload_dashboard() {
     local preview_uid="$3"
     local title="$4"
 
-    local dashboard_json
-    dashboard_json=$(jq \
+    local dashboard_file payload_file
+    dashboard_file=$(mktemp)
+    payload_file=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '${dashboard_file}' '${payload_file}'" RETURN
+
+    if ! jq -c \
         --arg uid "${preview_uid}" \
         --arg title "${title}" \
         'if .dashboard then .dashboard else . end
@@ -130,16 +145,19 @@ upload_dashboard() {
          | .title = $title
          | .id = null
          | .version = 0' \
-        "${file}")
+        "${file}" > "${dashboard_file}"; then
+        echo "ERROR: Failed to parse dashboard JSON from ${file}" >&2
+        return 1
+    fi
 
-    local payload
-    payload=$(jq -n \
+    jq -nc \
         --arg folder_uid "${folder_uid}" \
-        --argjson dashboard "${dashboard_json}" \
-        '{dashboard: $dashboard, folderUid: $folder_uid, overwrite: true}')
+        --slurpfile dashboard "${dashboard_file}" \
+        '{dashboard: $dashboard[0], folderUid: $folder_uid, overwrite: true}' \
+        > "${payload_file}"
 
     local response
-    response=$(grafana_api POST "/api/dashboards/db" -d "${payload}")
+    response=$(grafana_api POST "/api/dashboards/db" --data-binary "@${payload_file}")
 
     local status
     status=$(echo "${response}" | jq -r '.status')
@@ -166,7 +184,7 @@ github_request() {
 
 # Fetch every issue comment, following the "Link: next" header across all pages.
 list_all_issue_comments() {
-    local url="${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PULL_NUMBER}/comments?per_page=100"
+    local url="${GITHUB_API}/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/issues/${PULL_NUMBER}/comments?per_page=100"
     local headers body next
     while [[ -n "${url}" ]]; do
         headers=$(mktemp)
@@ -203,7 +221,7 @@ ${comment_body}"
              | sort_by(.id) | .[].id')
 
     if [[ -z "${marker_ids}" ]]; then
-        github_request POST "/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PULL_NUMBER}/comments" \
+        github_request POST "/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/issues/${PULL_NUMBER}/comments" \
             -H "Content-Type: application/json" \
             -d "${payload}" > /dev/null
         echo "Posted new PR comment" >&2
@@ -216,11 +234,11 @@ ${comment_body}"
 
     while IFS= read -r old_id; do
         [[ -z "${old_id}" || "${old_id}" == "${latest_id}" ]] && continue
-        github_request DELETE "/repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${old_id}" > /dev/null
+        github_request DELETE "/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/issues/comments/${old_id}" > /dev/null
         echo "Deleted stale preview comment ${old_id}" >&2
     done <<< "${marker_ids}"
 
-    github_request PATCH "/repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${latest_id}" \
+    github_request PATCH "/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/issues/comments/${latest_id}" \
         -H "Content-Type: application/json" \
         -d "${payload}" > /dev/null
     echo "Updated existing PR comment ${latest_id}" >&2

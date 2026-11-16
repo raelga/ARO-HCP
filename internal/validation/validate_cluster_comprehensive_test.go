@@ -102,24 +102,13 @@ func TestValidateClusterCreate(t *testing.T) {
 			expectErrors: []utils.ExpectedError{},
 		},
 		{
-			name: "OpenShift 5 rejected on create without experimental release features (no prior version id)",
+			name: "OpenShift 5.0 stable allowed on create without experimental release features",
 			cluster: func() *coreapi.Cluster {
 				c := createValidCluster()
 				c.CustomerProperties.Version.ID = "5.0"
+				c.CustomerProperties.Version.ChannelGroup = "stable"
 				return c
 			}(),
-			expectErrors: []utils.ExpectedError{
-				{Message: "OpenShift v5 and above is not supported", FieldPath: "customerProperties.version.id"},
-			},
-		},
-		{
-			name: "OpenShift 5 allowed with experimental release features - create",
-			cluster: func() *coreapi.Cluster {
-				c := createValidCluster()
-				c.CustomerProperties.Version.ID = "5.0"
-				return c
-			}(),
-			opOptions:    testFeatureOptions(metadataapi.FeatureExperimentalReleaseFeatures),
 			expectErrors: []utils.ExpectedError{},
 		},
 		{
@@ -2627,7 +2616,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "update: cross-major 4.22 to 5.0 rejected without experimental release features",
+			name: "update: cross-major 4.22 to 5.0 allowed without experimental release features",
 			newCluster: func() *coreapi.Cluster {
 				c := createValidCluster()
 				c.CustomerProperties.Version.ID = "5.0"
@@ -2638,9 +2627,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 				c.CustomerProperties.Version.ID = "4.22"
 				return c
 			}(),
-			expectErrors: []utils.ExpectedError{
-				{Message: "OpenShift v5 and above is not supported", FieldPath: "customerProperties.version.id"},
-			},
+			expectErrors: []utils.ExpectedError{},
 		},
 		{
 			name: "update: cross-major 4.20 to 5.0 rejected (4.20 not in 4→5 pairing map)",
@@ -2660,22 +2647,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "update: cross-major 4.22 to 5.0 allowed",
-			newCluster: func() *coreapi.Cluster {
-				c := createValidCluster()
-				c.CustomerProperties.Version.ID = "5.0"
-				return c
-			}(),
-			oldCluster: func() *coreapi.Cluster {
-				c := createValidCluster()
-				c.CustomerProperties.Version.ID = "4.22"
-				return c
-			}(),
-			opOptions:    testFeatureOptions(metadataapi.FeatureExperimentalReleaseFeatures),
-			expectErrors: []utils.ExpectedError{},
-		},
-		{
-			name: "update: cross-major 4.23 to 5.1 allowed",
+			name: "update: cross-major 4.23 to 5.1 allowed without experimental release features",
 			newCluster: func() *coreapi.Cluster {
 				c := createValidCluster()
 				c.CustomerProperties.Version.ID = "5.1"
@@ -2686,7 +2658,6 @@ func TestValidateClusterUpdate(t *testing.T) {
 				c.CustomerProperties.Version.ID = "4.23"
 				return c
 			}(),
-			opOptions:    testFeatureOptions(metadataapi.FeatureExperimentalReleaseFeatures),
 			expectErrors: []utils.ExpectedError{},
 		},
 		{
@@ -2923,6 +2894,52 @@ func TestValidateClusterUpdate(t *testing.T) {
 			errs := ValidateCluster(ctx, op, tt.newCluster, tt.oldCluster, nil)
 			utils.VerifyErrorsMatch(t, tt.expectErrors, errs)
 		})
+	}
+}
+
+func TestValidateClusterSingleReplicaAvailability(t *testing.T) {
+	tests := []struct {
+		name            string
+		op              operation.Type
+		oldAvailability coreapi.ControlPlaneAvailability
+		newAvailability coreapi.ControlPlaneAvailability
+		wantError       bool
+	}{
+		{name: "create rejects single replica", op: operation.Create, newAvailability: coreapi.SingleReplicaControlPlane, wantError: true},
+		{name: "create accepts default availability", op: operation.Create},
+		{name: "update retains single replica", op: operation.Update, oldAvailability: coreapi.SingleReplicaControlPlane, newAvailability: coreapi.SingleReplicaControlPlane},
+		{name: "update allows opt-out", op: operation.Update, oldAvailability: coreapi.SingleReplicaControlPlane},
+		{name: "update accepts default availability", op: operation.Update},
+		{name: "regular validation leaves new update opt-in to admission", op: operation.Update, newAvailability: coreapi.SingleReplicaControlPlane},
+	}
+	for _, tt := range tests {
+		for _, registered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/AFEC=%t", tt.name, registered), func(t *testing.T) {
+				cluster := createValidCluster()
+				cluster.ServiceProviderProperties.ExperimentalFeatures = coreapi.ExperimentalFeatures{
+					ControlPlaneAvailability: tt.newAvailability,
+					ControlPlanePodSizing:    coreapi.MinimalControlPlanePodSizing,
+				}
+				var oldCluster *coreapi.Cluster
+				if tt.op == operation.Update {
+					oldCluster = cluster.DeepCopy()
+					oldCluster.ServiceProviderProperties.ExperimentalFeatures.ControlPlaneAvailability = tt.oldAvailability
+				}
+				op := operation.Operation{Type: tt.op}
+				if registered {
+					op.Options = testFeatureOptions(metadataapi.FeatureExperimentalReleaseFeatures)
+				}
+				errs := ValidateCluster(t.Context(), op, cluster, oldCluster, nil)
+				var expectedErrors []utils.ExpectedError
+				if tt.wantError {
+					expectedErrors = []utils.ExpectedError{{
+						FieldPath: "serviceProviderProperties.experimentalFeatures.singleReplica",
+						Message:   "single-replica control planes cannot be enabled",
+					}}
+				}
+				utils.VerifyErrorsMatch(t, expectedErrors, errs)
+			})
+		}
 	}
 }
 

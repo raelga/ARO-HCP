@@ -39,7 +39,7 @@ import (
 	"github.com/Azure/ARO-HCP/internal/utils"
 )
 
-const IngressCertificateControllerName = "IngressCertificate"
+const IngressCertificateControllerName = "IngressServingCertificateK8sResources"
 
 type ingressCertificateSyncer struct {
 	resourcesDBClient            corecosmosstorage.ResourcesDBClient
@@ -117,7 +117,10 @@ func (syncer *ingressCertificateSyncer) SyncOnce(ctx context.Context, key contro
 		return nil
 	}
 	managementClusterID := serviceProviderCluster.Status.ManagementClusterResourceID
-	client := syncer.kubeApplierDBClients.For(ctx, managementClusterID)
+	client, err := syncer.kubeApplierDBClients.For(ctx, managementClusterID)
+	if err != nil {
+		return err
+	}
 	if client == nil {
 		return nil
 	}

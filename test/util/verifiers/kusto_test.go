@@ -31,45 +31,36 @@ func TestGatheredLogSources(t *testing.T) {
 	}{
 		{
 			name:       "all arms present",
-			sources:    []any{"maestro", "maestro", "hypershift", "acm-agent"},
-			containers: true,
-		},
-		{
-			name:       "missing maestro",
 			sources:    []any{"hypershift", "acm-agent"},
-			missing:    "[maestro]",
-			counts:     "maestro=0, hypershift=1, acm-agent=1",
 			containers: true,
 		},
 		{
 			name:       "missing hypershift",
-			sources:    []any{"maestro", "maestro", "acm-agent"},
+			sources:    []any{"acm-agent"},
 			missing:    "[hypershift]",
-			counts:     "maestro=2, hypershift=0, acm-agent=1",
+			counts:     "hypershift=0, acm-agent=1",
 			containers: true,
 		},
 		{
-			name:       "missing acm agent",
-			sources:    []any{"maestro", "hypershift"},
-			missing:    "[acm-agent]",
-			counts:     "maestro=1, hypershift=1, acm-agent=0",
+			name:       "acm agent is optional",
+			sources:    []any{"hypershift"},
 			containers: true,
 		},
 		{
 			name:       "all arms absent",
-			missing:    "[maestro hypershift acm-agent]",
-			counts:     "maestro=0, hypershift=0, acm-agent=0",
+			missing:    "[hypershift]",
+			counts:     "hypershift=0, acm-agent=0",
 			containers: true,
 		},
 		{
 			name:    "all arms present does not replace container checks",
-			sources: []any{"maestro", "hypershift", "acm-agent"},
-			counts:  "maestro=1, hypershift=1, acm-agent=1",
+			sources: []any{"hypershift", "acm-agent"},
+			counts:  "hypershift=1, acm-agent=1",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var found gatheredLogSources
-			for _, source := range []string{"maestro", "hypershift", "acm-agent"} {
+			for _, source := range []string{"hypershift", "acm-agent"} {
 				err := found.record(&mustgather.NormalizedLogLine{
 					QueryName: "otherQuery",
 					Log:       map[string]any{"source": source, "rows": "100"},
@@ -114,7 +105,7 @@ func TestGatheredLogSources(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected missing log sources to fail verification")
 			}
-			for _, want := range []string{"detailedInfraOrchestrationLogs expected at least one row per source", "observed counts: " + tt.counts} {
+			for _, want := range []string{"detailedInfraOrchestrationLogs expected at least one row per required source", "observed counts: " + tt.counts} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("expected failure to contain %q, got: %v", want, err)
 				}
@@ -133,6 +124,40 @@ func TestGatheredLogSources(t *testing.T) {
 	}
 }
 
+func TestRetainedContainersAreIndividuallyRequired(t *testing.T) {
+	expected := VerifyMustGatherLogs("subscription", "resource-group").config.ExpectedLogSources
+	for _, missing := range []string{"aro-hcp-frontend", "aro-hcp-backend", "clusters-service-server", "kube-apiserver"} {
+		t.Run(missing, func(t *testing.T) {
+			var found gatheredLogSources
+			for _, source := range []string{"hypershift"} {
+				if err := found.record(&mustgather.NormalizedLogLine{
+					QueryName: "detailedInfraOrchestrationLogs",
+					Log:       map[string]any{"source": source, "rows": "1"},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, source := range expected {
+				if source.ContainerName == missing {
+					continue
+				}
+				namespace := source.Namespace
+				if namespace == "" {
+					namespace = source.NamespacePrefix + "-cluster"
+				}
+				if err := found.record(&mustgather.NormalizedLogLine{
+					Namespace: namespace, ContainerName: source.ContainerName,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := found.verify(expected); err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("missing container %q must fail verification, got: %v", missing, err)
+			}
+		})
+	}
+}
+
 func TestOrchestrationSummaryCounts(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -141,11 +166,11 @@ func TestOrchestrationSummaryCounts(t *testing.T) {
 		want    int64
 		invalid bool
 	}{
-		{name: "uses aggregate count", source: "maestro", rows: "1599", want: 1599},
-		{name: "zero is not presence", source: "maestro", rows: "0"},
-		{name: "raw log is not summary", source: "maestro", invalid: true},
-		{name: "malformed count", source: "maestro", rows: "bad", invalid: true},
-		{name: "negative count", source: "maestro", rows: "-1", invalid: true},
+		{name: "uses aggregate count", source: "fleet", rows: "1599", want: 1599},
+		{name: "zero is not presence", source: "fleet", rows: "0"},
+		{name: "raw log is not summary", source: "fleet", invalid: true},
+		{name: "malformed count", source: "fleet", rows: "bad", invalid: true},
+		{name: "negative count", source: "fleet", rows: "-1", invalid: true},
 		{name: "missing source", rows: "1", invalid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,11 +182,11 @@ func TestOrchestrationSummaryCounts(t *testing.T) {
 			if (err != nil) != tc.invalid {
 				t.Fatalf("invalid=%t, got error %v", tc.invalid, err)
 			}
-			if got := found.orchestrationCounts["maestro"]; got != tc.want {
+			if got := found.orchestrationCounts["fleet"]; got != tc.want {
 				t.Fatalf("expected aggregate count %d, got %d", tc.want, got)
 			}
 			if !tc.invalid && tc.want == 0 {
-				if err := found.verify(nil); err == nil || !strings.Contains(err.Error(), "missing: [maestro hypershift acm-agent]") {
+				if err := found.verify(nil); err == nil || !strings.Contains(err.Error(), "missing: [hypershift]") {
 					t.Fatalf("zero-count summary must not satisfy presence: %v", err)
 				}
 			}
