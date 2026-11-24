@@ -3,7 +3,6 @@ name: gh-aw recompile
 on:
   workflow_dispatch:
   schedule: daily
-  needs: [recompile]
 permissions:
   contents: read
   pull-requests: read
@@ -17,6 +16,7 @@ engine: copilot
 model: sonnet
 tools:
   github:
+    mode: gh-proxy
     read-only: true
     toolsets: [repos, pull_requests, actions]
 timeout-minutes: 120
@@ -33,67 +33,11 @@ network:
     - gcsweb-ci.apps.ci.l2s4.p1.openshiftapps.com
     - gcs.ci.openshift.org
     - storage.googleapis.com
-jobs:
-  recompile:
-    name: Bootstrap compiler release reconciliation
-    needs: []
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-      checks: read
-      statuses: read
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    steps:
-      - name: Checkout trusted compiler bootstrap
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Set up repository Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
-        with:
-          go-version-file: go.work
-          cache: false
-      - name: Build trusted maintenance guard
-        run: |
-          mkdir -p "$RUNNER_TEMP/gh-aw/bin"
-          make -C tooling/depctl build BINARY="$RUNNER_TEMP/gh-aw/bin/depctl"
-          printf 'DEPCTL_BINARY=%s/gh-aw/bin/depctl\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - name: Mint scoped compiler refresh token
-        id: write-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
-        with:
-          client-id: ${{ secrets.DEPENDABOT_APP_CLIENT_ID }}
-          private-key: ${{ secrets.DEPENDABOT_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-      - name: Reconcile published compiler release
-        env:
-          GH_TOKEN: ${{ steps.write-token.outputs.token }}
-          CI_TOKEN: ${{ github.token }}
-          GITHUB_BASE_REF: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          version=$(gh api repos/github/gh-aw/releases/latest --jq .tag_name)
-          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          export TARGET_GH_AW_VERSION="$version"
-          gh extension install github/gh-aw --pin "$version"
-          bot='aro-hcp-robot[bot]'
-          bot_id=$(gh api "users/$bot" --jq .id)
-          git config --global user.name "$bot"
-          git config --global user.email "$bot_id+$bot@users.noreply.github.com"
-          gh auth setup-git
-          bash hack/gh-aw-recompile.sh
 steps:
-  - name: Checkout trusted recovery guard
+  - name: Checkout sandbox repair for read-only rehearsal
     uses: actions/checkout@v7.0.1
     with:
-      ref: ${{ github.event.repository.default_branch }}
+      ref: ${{ github.sha }}
       persist-credentials: false
       fetch-depth: 0
   - name: Set up sandbox Go from go.work
@@ -211,6 +155,14 @@ safe-outputs:
               "$DEPCTL_BINARY" maintenance "$action" --repository "$REPO" --number "$number" --head "$head" --kind upgrade
             fi
 ---
+
+## Read-only sandbox release verification rehearsal
+
+This manual non-default-branch run has one task: execute `"$DEPCTL_BINARY" dependabot native check-sandbox-read` inside the normal sandbox and report its complete stdout and exit status. The binary is built from this rehearsal commit.
+
+If the command returns `{"status":"verified"}` with exit status zero, emit only a `noop` recording that result and stop. If it fails, report the complete error using `report_incomplete` and stop.
+
+Do not prepare or execute updates, change repository files, or emit recovery outputs. Do not follow the maintenance instructions below during this rehearsal. Keep sandbox, credential, read-only and integrity restrictions unchanged.
 
 # Daily compiler maintenance
 
