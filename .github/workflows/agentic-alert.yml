@@ -6,6 +6,7 @@ on:
     - "Deps & Tools: GitHub Agentic Workflows"
     - "Deps & Tools: Dependabot PRs"
     - "Deps & Tools: Security Fixes"
+    - "Deps & Tools: Update Go Toolchain"
     types:
     - completed
 permissions: {}
