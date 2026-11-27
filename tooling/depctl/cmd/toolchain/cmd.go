@@ -74,6 +74,7 @@ func NewCommand(group string) (*cobra.Command, error) {
 	plan.Flags().StringVar(&raw.repo, "repo", toolchain.Repository, "GitHub repository")
 	command.AddCommand(plan)
 	RegisterPreparation(command)
+	RegisterPublication(command)
 	return command, nil
 }
 
